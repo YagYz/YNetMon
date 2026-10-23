@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Giriş Yap | YNetMon Homelab Guard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="auth-body">
+  <div class="auth-card">
+    <div class="brand" style="justify-content:center;margin-bottom:16px;">
+      <span class="logo-dot"></span>
+      <div>
+        <h1>YNetMon</h1>
+        <p class="subtitle">Homelab Ağ İzleyici &amp; OSI Paket Analizörü</p>
+      </div>
+    </div>
+
+    <div id="setupBanner" class="osi-learn hidden" style="margin-bottom:14px;">
+      🔒 <strong>İlk Kurulum:</strong> Henüz yönetici hesabı oluşturulmamış. Şimdi kullanacağınız yönetici kullanıcı adı ve şifresini belirleyin.
+    </div>
+
+    <form id="authForm" class="auth-form">
+      <label>
+        <span>Kullanıcı Adı</span>
+        <input type="text" id="authUser" autocomplete="username" required minlength="3" maxlength="32" placeholder="admin" />
+      </label>
+      <label>
+        <span>Şifre</span>
+        <input type="password" id="authPass" autocomplete="current-password" required minlength="8" placeholder="En az 8 karakter" />
+      </label>
+      <label id="confirmWrap" class="hidden">
+        <span>Şifre (Tekrar)</span>
+        <input type="password" id="authPassConfirm" autocomplete="new-password" placeholder="Şifreyi tekrar girin" />
+      </label>
+
+      <div id="authError" class="auth-error hidden"></div>
+
+      <button type="submit" id="authSubmitBtn" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px;">
+        Giriş Yap
+      </button>
+    </form>
+  </div>
+
+  <script src="/static/login.js"></script>
+</body>
+</html>

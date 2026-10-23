@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/*.pcap
+.env
+.vscode/
+.idea/

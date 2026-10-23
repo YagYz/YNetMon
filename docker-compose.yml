@@ -1,0 +1,19 @@
+services:
+  ynetmon:
+    build: .
+    container_name: ynetmon
+    restart: unless-stopped
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - YNETMON_PORT=8765
+      - YNETMON_DB=/app/data/ynetmon.db

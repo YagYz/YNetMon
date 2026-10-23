@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YNetMon | Homelab Ağ İzleme &amp; OSI Paket Analizörü</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo-dot"></span>
+      <div>
+        <h1>YNetMon</h1>
+        <p class="subtitle">Homelab Ağ Trafiği İzleyici &amp; Eğitici OSI Paket Analizörü</p>
+      </div>
+    </div>
+
+    <div class="top-controls">
+      <div id="captureBadge" class="badge badge-ok" title="Aktif trafik analiz modu">
+        Analiz Motoru Aktif
+      </div>
+      <div id="storageBadge" class="badge badge-neutral" title="SQLite Veritabanı Boyutu ve Kayıt Sayısı">
+        DB: 0.0 MB
+      </div>
+      <label class="iface-picker">
+        <span>Arayüz:</span>
+        <select id="ifaceSelect"></select>
+      </label>
+      <button id="btnLabTraffic" class="btn btn-accent" title="DNS, TCP 3'lü El Sıkışma, TLS SNI ve HTTP örnek paketleri üret">
+        + Örnek Paketler (Lab)
+      </button>
+      <a href="/api/export/pcap?limit=300" class="btn btn-outline" download>
+        .PCAP İndir
+      </a>
+      <span id="userBadge" class="badge badge-ok">👤 -</span>
+      <button id="btnLogout" class="btn btn-outline" title="Güvenli Çıkış">Çıkış Yap</button>
+    </div>
+  </header>
+
+  <section class="metrics-strip">
+    <div class="metric-card">
+      <span class="metric-label">İndirme (RX)</span>
+      <strong id="metricRx" class="metric-val rx-color">0.0 KB/s</strong>
+      <small id="metricRxPps">0 pkt/s</small>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Yükleme (TX)</span>
+      <strong id="metricTx" class="metric-val tx-color">0.0 KB/s</strong>
+      <small id="metricTxPps">0 pkt/s</small>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Aktif Soket / Bağlantı</span>
+      <strong id="metricConns" class="metric-val">0</strong>
+      <small id="metricLocalIp">Yerel IP: -</small>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Docker Container</span>
+      <strong id="metricDocker" class="metric-val">0</strong>
+      <small>Canlı Ağ Eşleşmesi</small>
+    </div>
+    <div class="chart-card">
+      <div class="chart-header">
+        <span>Canlı Bant Genişliği (Son 60 sn)</span>
+        <span class="chart-legend"><i class="dot-rx"></i> RX (İndirme) <i class="dot-tx"></i> TX (Yükleme)</span>
+      </div>
+      <canvas id="bwChart" width="600" height="85"></canvas>
+    </div>
+  </section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="tab-packets">1. Paket &amp; OSI İnceleyici</button>
+    <button class="tab" data-tab="tab-connections">2. Aktif Bağlantılar (Soketler)</button>
+    <button class="tab" data-tab="tab-devices">3. Cihaz / IP Veri Kullanımı</button>
+    <button class="tab" data-tab="tab-docker">4. Docker Container Trafiği</button>
+    <button class="tab" data-tab="tab-alerts">5. Alarmlar, Saklama &amp; Entegrasyon</button>
+  </nav>
+
+  <main class="content">
+    <!-- TAB 1: PACKET & OSI INSPECTOR -->
+    <section id="tab-packets" class="tab-panel active">
+      <div class="filter-bar">
+        <input type="text" id="filterIp" placeholder="IP Filtrele (örn: 192.168.1.1)" />
+        <input type="number" id="filterPort" placeholder="Port (örn: 443, 53)" />
+        <select id="filterProto">
+          <option value="">Tüm Protokoller</option>
+          <option value="TCP">TCP</option>
+          <option value="UDP">UDP</option>
+          <option value="DNS">DNS</option>
+          <option value="TLS">TLS / HTTPS</option>
+          <option value="HTTP">HTTP</option>
+          <option value="SSH">SSH</option>
+          <option value="ICMP">ICMP</option>
+        </select>
+        <input type="text" id="filterContainer" placeholder="Container..." />
+        <input type="text" id="filterSearch" placeholder="Domain (SNI) veya içerik ara..." />
+        <select id="pageSizeSelect" title="Sayfa başına gösterilecek paket sayısı">
+          <option value="50" selected>50 Kayıt / Sayfa</option>
+          <option value="100">100 Kayıt / Sayfa</option>
+          <option value="150">150 Kayıt / Sayfa</option>
+        </select>
+        <button id="btnApplyFilter" class="btn btn-primary">Filtrele</button>
+        <button id="btnClearFilter" class="btn btn-outline">Sıfırla</button>
+        <button id="btnClearPackets" class="btn btn-outline" title="Kayıtlı paket geçmişini temizle">Tabloyu Boşalt</button>
+        <label class="auto-scroll-toggle">
+          <input type="checkbox" id="chkLiveStream" checked />
+          <span id="liveStreamLabel">Canlı Akış</span>
+        </label>
+      </div>
+
+      <div class="pagination-bar">
+        <span id="packetCountInfo" class="muted">Toplam 0 kayıt</span>
+        <div class="pagination-controls">
+          <button id="btnPrevPage" class="btn btn-outline btn-sm" disabled>&laquo; Önceki</button>
+          <span id="pageIndicator" class="badge badge-neutral">Sayfa 1 / 1</span>
+          <button id="btnNextPage" class="btn btn-outline btn-sm" disabled>Sonraki &raquo;</button>
+        </div>
+      </div>
+
+      <div class="inspector-split">
+        <div class="packet-list-pane" id="packetListPane">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Zaman</th>
+                <th>Kaynak</th>
+                <th>Hedef</th>
+                <th>Protokol</th>
+                <th>Boyut</th>
+                <th>Süreç / Container</th>
+                <th>Özet / Domain (SNI)</th>
+              </tr>
+            </thead>
+            <tbody id="packetTableBody"></tbody>
+          </table>
+        </div>
+
+        <div class="packet-detail-pane" id="packetDetailPane">
+          <div class="detail-empty">
+            <h3>OSI Katman &amp; Paket İnceleyici</h3>
+            <p>Sol tablodan herhangi bir pakete tıklayarak <strong>Karar Motoru</strong>, <strong>Katman 2 (MAC)</strong>, <strong>Katman 3 (IP/TTL)</strong>, <strong>Katman 4 (TCP Bayrakları/Port)</strong>, <strong>Katman 7 (DNS/HTTP/TLS)</strong> detaylarını ve <strong>Hex/ASCII</strong> içeriğini inceleyebilirsiniz.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: ACTIVE CONNECTIONS -->
+    <section id="tab-connections" class="tab-panel">
+      <div class="panel-header">
+        <div>
+          <h2>Aktif TCP / UDP Soket Bağlantıları</h2>
+          <p class="muted">İşletim sistemi çekirdeğindeki anlık açık bağlantılar, ağ sağlayıcıları ve TCP durum (state) açıklamaları.</p>
+        </div>
+        <button id="btnRefreshConns" class="btn btn-primary">Yenile</button>
+      </div>
+      <div class="table-wrap table-scroll-bounded">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Protokol</th>
+              <th>Yerel Adres</th>
+              <th>Uzak Adres</th>
+              <th>Sağlayıcı / Ağ</th>
+              <th>Durum (TCP State)</th>
+              <th>Eğitici Açıklama (Networking)</th>
+              <th>Süreç (PID)</th>
+              <th>Container</th>
+            </tr>
+          </thead>
+          <tbody id="connTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- TAB 3: DEVICES / IP USAGE -->
+    <section id="tab-devices" class="tab-panel">
+      <div class="panel-header">
+        <div>
+          <h2>Cihaz / IP Bazlı Toplam Veri Kullanımı</h2>
+          <p class="muted">SQLite veritabanında biriken IP bazlı gönderilen/alınan bayt, paket sayısı ve kullanılan protokoller.</p>
+        </div>
+        <div class="inline-controls">
+          <input type="text" id="deviceSearch" placeholder="IP, Container veya Protokol ara..." />
+          <button id="btnSearchDevices" class="btn btn-primary">Ara</button>
+        </div>
+      </div>
+      <div class="table-wrap table-scroll-bounded">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>IP Adresi</th>
+              <th>MAC Adresi</th>
+              <th>Container / Etiket</th>
+              <th>Gönderilen (TX)</th>
+              <th>Alınan (RX)</th>
+              <th>Toplam Veri</th>
+              <th>Paket (TX / RX)</th>
+              <th>Protokoller</th>
+              <th>Son Görülme</th>
+              <th>İşlem</th>
+            </tr>
+          </thead>
+          <tbody id="deviceTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- TAB 4: DOCKER CONTAINERS -->
+    <section id="tab-docker" class="tab-panel">
+      <div class="panel-header">
+        <div>
+          <h2>Docker Container Ağ Haritası ve Trafiği</h2>
+          <p class="muted">Homelab üzerindeki aktif Docker container'ları, IP adresleri, port eşlemeleri ve canlı ağ/kaynak kullanımı.</p>
+        </div>
+        <button id="btnRefreshDocker" class="btn btn-primary">Container'ları Yenile</button>
+      </div>
+      <div id="dockerGrid" class="docker-grid"></div>
+    </section>
+
+    <!-- TAB 5: ALERTS, STORAGE & INTEGRATION -->
+    <section id="tab-alerts" class="tab-panel">
+      <div class="alerts-layout">
+        <div class="settings-card">
+          <h3>Karar Motoru, Saklama &amp; Bildirim Ayarları</h3>
+          <form id="settingsForm">
+            <h4 style="color:var(--accent);font-size:13px;">1. Merkezi Homelab Bot Gateway &amp; Dış Entegrasyon</h4>
+            <div class="form-row">
+              <label>
+                <span>Bot Hub URL (Giden Bildirim Adresi)</span>
+                <input type="url" id="setHubUrl" placeholder="http://127.0.0.1:9090/api/notify" />
+              </label>
+              <label>
+                <span>Entegrasyon &amp; Bot Hub API Key (X-API-Key)</span>
+                <input type="text" id="setHubApiKey" placeholder="En az 8 karakterli gizli anahtar" />
+              </label>
+            </div>
+            <div class="osi-learn" style="font-size:11.5px;">
+              🔗 <strong>Dış Servis / Bot Sorgu Uç Noktaları (<code>X-API-Key</code> başlığı ile):</strong><br/>
+              • <code>GET /api/v1/integration/summary</code> (Anlık hız, bağlantı, DB ve son alarmlar)<br/>
+              • <code>GET /api/v1/integration/alerts</code> (Son alarmlar listesi)<br/>
+              • <code>GET /api/v1/integration/docker</code> (Çalışan container ağ istatistikleri)
+            </div>
+
+            <h4 style="color:var(--accent);font-size:13px;margin-top:4px;">2. Veri Saklama &amp; Disk Optimizasyonu</h4>
+            <div class="form-row">
+              <label>
+                <span>Maksimum Paket Kaydı (100-10000)</span>
+                <input type="number" id="setMaxPackets" min="100" max="10000" />
+              </label>
+              <label>
+                <span>Saklama Süresi (Saat: 1-720)</span>
+                <input type="number" step="1" id="setRetentionHours" min="1" max="720" />
+              </label>
+            </div>
+            <div class="form-row">
+              <label>
+                <span>Aynı Akış Tekilleştirme Süresi (Sn: 0-600)</span>
+                <input type="number" id="setFlowDedup" min="0" max="600" />
+              </label>
+              <label>
+                <span>Veritabanı Bakımı</span>
+                <button type="button" id="btnVacuumDb" class="btn btn-outline" style="width:100%;">Şimdi Optimize Et (Vacuum)</button>
+              </label>
+            </div>
+
+            <h4 style="color:var(--accent);font-size:13px;margin-top:4px;">3. Doğrudan Telegram &amp; Signal Bildirimi</h4>
+            <div class="form-row">
+              <label>
+                <span>Telegram Bot Token (@BotFather)</span>
+                <input type="text" id="setTgToken" placeholder="123456:ABC-DEF..." />
+              </label>
+              <label>
+                <span>Telegram Chat ID</span>
+                <div style="display:flex;gap:6px;">
+                  <input type="text" id="setTgChat" placeholder="123456789" style="width:100%;" />
+                  <button type="button" id="btnDetectTgChat" class="btn btn-outline">Bul</button>
+                </div>
+              </label>
+            </div>
+            <div class="form-row">
+              <label>
+                <span>Signal Yöntemi</span>
+                <select id="setSignalMode">
+                  <option value="callmebot">CallMeBot (Ücretsiz)</option>
+                  <option value="rest_api">Self-Hosted (signal-cli-rest-api)</option>
+                </select>
+              </label>
+              <label>
+                <span>Signal Telefon No / UUID</span>
+                <input type="text" id="setSignalPhone" placeholder="+905551112233" />
+              </label>
+            </div>
+            <div class="form-row">
+              <label>
+                <span>Signal API Key / Alıcı No</span>
+                <input type="text" id="setSignalTarget" placeholder="API Key veya +905..." />
+              </label>
+              <label>
+                <span>Signal REST URL (Self-Hosted)</span>
+                <input type="url" id="setSignalApiUrl" placeholder="http://127.0.0.1:8080" />
+              </label>
+            </div>
+
+            <h4 style="color:var(--accent);font-size:13px;margin-top:4px;">4. Karar Motoru, Beyaz Liste &amp; Eşikler</h4>
+            <label>
+              <span>Güvenilir IP Beyaz Listesi (Allowlist - Virgülle ayırın)</span>
+              <input type="text" id="setAllowlistIps" placeholder="155.133.250.4, 192.168.1.50" />
+            </label>
+            <label>
+              <span>Discord / Slack / Genel Webhook URL</span>
+              <input type="url" id="setWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
+            </label>
+            <label>
+              <span>İzlenen Kritik Portlar (Sadece dıştan gelen erişimde alarm verir)</span>
+              <input type="text" id="setWatchedPorts" placeholder="21,22,23,3389,4444,5900" />
+            </label>
+            <div class="form-row">
+              <label>
+                <span>Bant Genişliği Alarm Eşiği (Mbps)</span>
+                <input type="number" step="0.5" id="setBwThreshold" />
+              </label>
+              <label>
+                <span>Port Tarama Eşiği (30 sn'de farklı yerel port)</span>
+                <input type="number" id="setScanThreshold" />
+              </label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Ayarları Kaydet</button>
+              <button type="button" id="btnTestWebhook" class="btn btn-accent">Test Bildirimi Gönder</button>
+            </div>
+            <p id="settingsStatus" class="status-msg"></p>
+          </form>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:18px 0;" />
+          <h3>Hesap Güvenliği &amp; Şifre Değiştir</h3>
+          <form id="passwordForm">
+            <label>
+              <span>Mevcut Şifre</span>
+              <input type="password" id="curPassword" required minlength="8" autocomplete="current-password" />
+            </label>
+            <label>
+              <span>Yeni Şifre (En az 8 karakter)</span>
+              <input type="password" id="newPassword" required minlength="8" autocomplete="new-password" />
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Şifreyi Güncelle</button>
+            </div>
+            <p id="passwordStatus" class="status-msg"></p>
+          </form>
+        </div>
+
+        <div class="alerts-list-card">
+          <div class="panel-header">
+            <div>
+              <h3>Doğrulanmış Alarmlar</h3>
+              <p class="muted">Steam, Cloudflare, Google, yerel tarayıcı ve giden bağlantılar karar motoru tarafından otomatik filtrelenir.</p>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button id="btnClearAlerts" class="btn btn-outline">Alarmları Temizle</button>
+              <button id="btnRefreshAlerts" class="btn btn-outline">Yenile</button>
+            </div>
+          </div>
+          <div class="table-wrap table-scroll-bounded">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Zaman</th>
+                  <th>Seviye</th>
+                  <th>Kural</th>
+                  <th>Kaynak -&gt; Hedef</th>
+                  <th>Açıklama</th>
+                </tr>
+              </thead>
+              <tbody id="alertsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
