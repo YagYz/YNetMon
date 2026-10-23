@@ -518,7 +518,7 @@ async function loadSettings() {
   const s = await res.json();
   document.getElementById("setHubUrl").value = s.hub_url || "";
   document.getElementById("setHubApiKey").value = s.hub_api_key || "";
-  document.getElementById("setMaxPackets").value = s.max_stored_packets || "2000";
+  document.getElementById("setMaxPackets").value = s.max_stored_packets || "5000";
   document.getElementById("setRetentionHours").value = s.retention_hours || "24";
   document.getElementById("setFlowDedup").value = s.flow_dedup_seconds || "30";
   document.getElementById("setAllowlistIps").value = s.allowlist_ips || "";

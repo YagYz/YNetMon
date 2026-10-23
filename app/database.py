@@ -132,12 +132,13 @@ def init_db() -> None:
             "bandwidth_threshold_mbps": "50.0",
             "port_scan_threshold": "15",
             "enable_notifications": "true",
-            "max_stored_packets": "2000",
+            "max_stored_packets": "5000",
             "retention_hours": "24",
             "flow_dedup_seconds": "30",
         }
         for k, v in defaults.items():
             cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+        cur.execute("UPDATE settings SET value = '5000' WHERE key = 'max_stored_packets' AND value = '2000'")
 
         # Remove historic false-positive alerts caused by Steam (155.133.x.x) or own outbound IP
         cur.execute("DELETE FROM alerts WHERE src_ip LIKE '155.133.%' OR src_ip LIKE '162.254.%'")
@@ -310,7 +311,7 @@ def insert_packet(pkt: Dict[str, Any]) -> int:
         if pkt_id % 100 == 0:
             cur.execute("SELECT value FROM settings WHERE key = 'max_stored_packets'")
             row_max = cur.fetchone()
-            max_pkts = int(row_max["value"]) if row_max and str(row_max["value"]).isdigit() else 2000
+            max_pkts = int(row_max["value"]) if row_max and str(row_max["value"]).isdigit() else 5000
             max_pkts = max(100, min(10000, max_pkts))
             cur.execute(
                 "DELETE FROM packets WHERE id <= (SELECT MAX(id) - ? FROM packets)",
@@ -549,7 +550,7 @@ def run_db_maintenance() -> Dict[str, Any]:
         cur = conn.cursor()
         cur.execute("SELECT key, value FROM settings WHERE key IN ('max_stored_packets', 'retention_hours')")
         cfg = {r["key"]: r["value"] for r in cur.fetchall()}
-        max_pkts = int(cfg.get("max_stored_packets", "2000") or 2000)
+        max_pkts = int(cfg.get("max_stored_packets", "5000") or 5000)
         max_pkts = max(100, min(10000, max_pkts))
         ret_hours = float(cfg.get("retention_hours", "24") or 24.0)
         cutoff = time.time() - (ret_hours * 3600.0)

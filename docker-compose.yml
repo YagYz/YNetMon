@@ -1,7 +1,10 @@
 services:
   ynetmon:
-    build: .
-    container_name: ynetmon
+    image: ghcr.io/yagyz/ynetmon:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ynetmon-app
     restart: unless-stopped
     network_mode: host
     cap_drop:
@@ -12,8 +15,12 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - ./data:/app/data
+      - ${HOST_DATA_DIR:-./data}:/app/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - YNETMON_PORT=8765
+      - YNETMON_PORT=${YNETMON_PORT:-8765}
       - YNETMON_DB=/app/data/ynetmon.db
+      - YNETMON_ADMIN_USER=${YNETMON_ADMIN_USER:-}
+      - YNETMON_ADMIN_PASS=${YNETMON_ADMIN_PASS:-}
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
