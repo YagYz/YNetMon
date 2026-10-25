@@ -660,3 +660,11 @@ async def ws_live(websocket: WebSocket) -> None:
         pass
     finally:
         _active_ws_connections = max(0, _active_ws_connections - 1)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("YNETMON_PORT", "8765"))
+    host = os.environ.get("YNETMON_HOST", "0.0.0.0")
+    uvicorn.run("app.main:app", host=host, port=port)

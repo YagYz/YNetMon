@@ -479,9 +479,12 @@ input:focus, select:focus {
   word-break: break-word;
 }
 
+.osi-layer.l1 { border-left-color: #f97316; }
 .osi-layer.l2 { border-left-color: #94a3b8; }
 .osi-layer.l3 { border-left-color: #38bdf8; }
 .osi-layer.l4 { border-left-color: #a855f7; }
+.osi-layer.l5 { border-left-color: #ec4899; }
+.osi-layer.l6 { border-left-color: #eab308; }
 .osi-layer.l7 { border-left-color: #22c55e; }
 
 .osi-layer h4 {

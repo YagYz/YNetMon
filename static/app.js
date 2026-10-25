@@ -280,9 +280,12 @@ async function showPacketDetail(pktId) {
     pkt = await res.json();
   }
   const osi = pkt.osi || {};
+  const l1 = osi.layer1 || {};
   const l2 = osi.layer2 || {};
   const l3 = osi.layer3 || {};
   const l4 = osi.layer4 || {};
+  const l5 = osi.layer5 || {};
+  const l6 = osi.layer6 || {};
   const l7 = osi.layer7 || {};
   const dec = osi.decision || {};
 
@@ -312,24 +315,47 @@ async function showPacketDetail(pktId) {
   const pane = document.getElementById("packetDetailPane");
   pane.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px;">
-      <h3>Paket #${pkt.id} OSI Katman Analizi</h3>
+      <h3>Paket #${pkt.id} OSI 7 Katman Analizi</h3>
       <span class="proto-pill proto-${escapeHtml(pkt.l7_proto || pkt.protocol)}">${escapeHtml(pkt.l7_proto || pkt.protocol)} (${pkt.length} Bayt)</span>
     </div>
 
     ${decHtml}
 
     <div class="osi-layer l7">
-      <h4>${escapeHtml(l7.title || "Katman 7 - Uygulama")}</h4>
+      <h4>${escapeHtml(l7.title || "Katman 7 - Uygulama (Application)")}</h4>
       <div class="osi-kv">
-        <span>Servis: <strong>${escapeHtml(l7.l7_proto || "-")}</strong></span>
+        <span>Servis / Protokol: <strong>${escapeHtml(l7.l7_proto || pkt.l7_proto || pkt.protocol)}</strong></span>
         ${l7.domain_sni ? `<span>Domain / SNI: <strong>${escapeHtml(l7.domain_sni)}</strong></span>` : ""}
+        ${pkt.process_name ? `<span>Uygulama / Süreç: <strong>${escapeHtml(pkt.process_name)}</strong></span>` : ""}
         <span>Özet: <strong>${escapeHtml(l7.info || pkt.info)}</strong></span>
       </div>
       <div class="osi-learn">💡 ${escapeHtml(l7.learn || "")}</div>
     </div>
 
+    <div class="osi-layer l6">
+      <h4>${escapeHtml(l6.title || "Katman 6 - Sunum (Presentation)")}</h4>
+      <div class="osi-kv">
+        <span>Şifreleme: <strong>${escapeHtml(l6.encryption || "-")}</strong></span>
+        <span>Kodlama: <strong>${escapeHtml(l6.encoding || "-")}</strong></span>
+        <span>MIME / İçerik: <strong>${escapeHtml(l6.mime_type || "-")}</strong></span>
+        <span>Sıkıştırma: <strong>${escapeHtml(l6.compression || "-")}</strong></span>
+      </div>
+      <div class="osi-learn">💡 ${escapeHtml(l6.learn || "")}</div>
+    </div>
+
+    <div class="osi-layer l5">
+      <h4>${escapeHtml(l5.title || "Katman 5 - Oturum (Session)")}</h4>
+      <div class="osi-kv">
+        <span>Oturum Kimliği: <strong>${escapeHtml(l5.session_id || `${pkt.src_ip}:${pkt.src_port} ↔ ${pkt.dst_ip}:${pkt.dst_port}`)}</strong></span>
+        <span>Oturum Durumu: <strong>${escapeHtml(l5.session_phase || "-")}</strong></span>
+        <span>İletişim Türü: <strong>${escapeHtml(l5.dialogue_mode || "Full-Duplex")}</strong></span>
+        <span>İlişkili Süreç: <strong>${escapeHtml(l5.process || pkt.process_name || pkt.container_name || "kernel")}</strong></span>
+      </div>
+      <div class="osi-learn">💡 ${escapeHtml(l5.learn || "")}</div>
+    </div>
+
     <div class="osi-layer l4">
-      <h4>${escapeHtml(l4.title || "Katman 4 - Taşıma")}</h4>
+      <h4>${escapeHtml(l4.title || "Katman 4 - Taşıma (Transport)")}</h4>
       <div class="osi-kv">
         <span>Kaynak Port: <strong>${l4.src_port ?? pkt.src_port}</strong></span>
         <span>Hedef Port: <strong>${l4.dst_port ?? pkt.dst_port}</strong></span>
@@ -341,10 +367,11 @@ async function showPacketDetail(pktId) {
     </div>
 
     <div class="osi-layer l3">
-      <h4>${escapeHtml(l3.title || "Katman 3 - Ağ (IP)")}</h4>
+      <h4>${escapeHtml(l3.title || "Katman 3 - Ağ (Network / IP)")}</h4>
       <div class="osi-kv">
         <span>Kaynak IP: <strong>${escapeHtml(l3.src_ip || pkt.src_ip)}</strong></span>
         <span>Hedef IP: <strong>${escapeHtml(l3.dst_ip || pkt.dst_ip)}</strong></span>
+        <span>IP Sürümü: <strong>${escapeHtml(l3.ip_version || "IPv4")}</strong></span>
         <span>TTL: <strong>${l3.ttl ?? pkt.ttl}</strong></span>
         <span>OS Tahmini: <strong>${escapeHtml(l3.os_hint || "-")}</strong></span>
       </div>
@@ -352,13 +379,26 @@ async function showPacketDetail(pktId) {
     </div>
 
     <div class="osi-layer l2">
-      <h4>${escapeHtml(l2.title || "Katman 2 - Veri Bağı (Ethernet)")}</h4>
+      <h4>${escapeHtml(l2.title || "Katman 2 - Veri Bağı (Data Link / Ethernet)")}</h4>
       <div class="osi-kv">
         <span>Kaynak MAC: <strong>${escapeHtml(l2.src_mac || pkt.src_mac)}</strong></span>
         <span>Hedef MAC: <strong>${escapeHtml(l2.dst_mac || pkt.dst_mac)}</strong></span>
         <span>EtherType: <strong>${escapeHtml(l2.eth_type || pkt.eth_type)}</strong></span>
+        ${l2.frame_size ? `<span>Çerçeve Boyutu: <strong>${escapeHtml(l2.frame_size)}</strong></span>` : ""}
       </div>
       <div class="osi-learn">💡 ${escapeHtml(l2.learn || "")}</div>
+    </div>
+
+    <div class="osi-layer l1">
+      <h4>${escapeHtml(l1.title || "Katman 1 - Fiziksel (Physical)")}</h4>
+      <div class="osi-kv">
+        <span>Ağ Arabirimi: <strong>${escapeHtml(l1.iface || pkt.iface || "eth0")}</strong></span>
+        <span>MTU: <strong>${escapeHtml(String(l1.mtu || 1500))} Bayt</strong></span>
+        <span>Hat Hızı: <strong>${escapeHtml(l1.speed || "1000 Mbps")}</strong></span>
+        <span>Fiziksel Ortam: <strong>${escapeHtml(l1.medium || "Ethernet")}</strong></span>
+        <span>Durum: <strong>${escapeHtml(l1.status || "Aktif (Link UP)")}</strong></span>
+      </div>
+      <div class="osi-learn">💡 ${escapeHtml(l1.learn || "")}</div>
     </div>
 
     <h4 style="margin:12px 0 6px;font-size:13px;">Paket Payload (Hex &amp; ASCII İnceleyici)</h4>

@@ -138,8 +138,26 @@ def extract_http_info(payload: bytes) -> tuple[str, str]:
         return "", ""
 
 
+_IFACE_STATS_CACHE: Dict[str, Any] = {}
+_IFACE_STATS_CACHE_TIME: float = 0.0
+
+
+def get_cached_iface_stats() -> Dict[str, Any]:
+    global _IFACE_STATS_CACHE, _IFACE_STATS_CACHE_TIME
+    now = time.time()
+    if not _IFACE_STATS_CACHE or (now - _IFACE_STATS_CACHE_TIME > 10.0):
+        try:
+            import psutil  # type: ignore
+
+            _IFACE_STATS_CACHE = psutil.net_if_stats()
+            _IFACE_STATS_CACHE_TIME = now
+        except Exception:
+            pass
+    return _IFACE_STATS_CACHE
+
+
 def build_osi_explanation(pkt: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate educational OSI layer breakdown for a packet dictionary."""
+    """Generate educational 7-layer OSI breakdown for a packet dictionary."""
     src_port = pkt.get("src_port", 0)
     dst_port = pkt.get("dst_port", 0)
     proto = pkt.get("protocol", "TCP")
@@ -158,18 +176,138 @@ def build_osi_explanation(pkt: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     ttl = pkt.get("ttl", 64)
-    os_guess = "Linux / Android / Container (~64)" if ttl <= 64 else ("Windows (~128)" if ttl <= 128 else "Network Router / Solaris (~255)")
+    os_guess = (
+        "Linux / Android / Container (~64)"
+        if ttl <= 64
+        else ("Windows (~128)" if ttl <= 128 else "Network Router / Solaris (~255)")
+    )
+
+    # 1. Katman 1 - Fiziksel (Physical)
+    iface_name = pkt.get("iface") or "eth0"
+    stats_dict = get_cached_iface_stats()
+    st = stats_dict.get(iface_name) or stats_dict.get(iface_name.split(":")[0])
+    mtu = getattr(st, "mtu", 1500) if st else (65536 if iface_name == "lo" else 1500)
+    speed = getattr(st, "speed", 0) if st else 0
+    speed_str = (
+        f"{speed} Mbps"
+        if speed > 0
+        else (
+            "Sanal / Köprü Arabirimi"
+            if ("docker" in iface_name or "br-" in iface_name or "veth" in iface_name or iface_name == "lo")
+            else "1000 Mbps (Otomatik)"
+        )
+    )
+    medium_type = (
+        "Loopback (Yerel Bellek İçi Soket İletişimi)"
+        if iface_name == "lo"
+        else (
+            "Sanal Köprü (Docker Bridge / veth pair)"
+            if ("docker" in iface_name or "br-" in iface_name or "veth" in iface_name)
+            else (
+                "VPN Tüneli (WireGuard / Tailscale TUN)"
+                if ("tailscale" in iface_name or "wg" in iface_name or "tun" in iface_name)
+                else (
+                    "Kablosuz Ağ (Wi-Fi 802.11)"
+                    if ("wl" in iface_name)
+                    else "Bakır / Fiber Ethernet (IEEE 802.3 RJ45 / SFP+)"
+                )
+            )
+        )
+    )
+
+    # 5. Katman 5 - Oturum (Session)
+    session_tuple = f"{pkt.get('src_ip', '')}:{src_port} ↔ {pkt.get('dst_ip', '')}:{dst_port}"
+    if proto == "TCP":
+        if "SYN" in flags_list and "ACK" not in flags_list:
+            session_phase = "SYN_SENT (Oturum Başlatma Talebi)"
+        elif "SYN" in flags_list and "ACK" in flags_list:
+            session_phase = "SYN_RCVD (Oturum Onayı - 2. Adım)"
+        elif "FIN" in flags_list or "RST" in flags_list:
+            session_phase = "TERMINATING (Oturum Kapatılıyor)"
+        elif "PSH" in flags_list:
+            session_phase = "DATA_TRANSFER (Aktif Veri İletimi)"
+        else:
+            session_phase = "ESTABLISHED (Aktif Çift Yönlü Oturum)"
+        dialogue = "Full-Duplex (Eşzamanlı Çift Yönlü Oturum)"
+    elif proto == "UDP":
+        session_phase = "STATELESS_DATAGRAM (Bağlantısız İstek-Yanıt)"
+        dialogue = "Simplex / Datagram (Bağlantısız İletim)"
+    else:
+        session_phase = "CONTROL_MESSAGE (Ağ Denetim İletisi)"
+        dialogue = "Unidirectional (Tek Yönlü Bildirim)"
+
+    # 6. Katman 6 - Sunum (Presentation)
+    payload_hex = pkt.get("payload_hex", "")
+    is_tls = (
+        l7 in ("TLS", "HTTPS")
+        or dst_port == 443
+        or src_port == 443
+        or (payload_hex and payload_hex.startswith("0000  16 03"))
+    )
+    is_http = l7 == "HTTP" or dst_port == 80 or src_port == 80
+    is_dns = l7 == "DNS" or dst_port == 53 or src_port == 53
+    is_ssh = l7 == "SSH" or dst_port == 22 or src_port == 22
+
+    if is_tls:
+        encoding_str = "Kriptolu İkili Veri (TLS Record / Ciphertext)"
+        enc_str = "TLS 1.2 / TLS 1.3 (AES-GCM / ChaCha20 - Uçtan Uca Şifreli)"
+        mime_str = "application/tls-record (Kriptolu Uygulama Yükü)"
+        comp_str = "TLS Compression Devre Dışı (CRIME/BREACH Güvenlik Koruması)"
+        l6_learn = (
+            "Katman 6 verinin gizliliğini TLS şifrelemesiyle sağlar. Ağdaki üçüncü şahıslar verinin içeriğini "
+            "(HTTP başlıkları, JSON, parolalar) göremez, yalnızca şifreli baytları izler."
+        )
+    elif is_http:
+        encoding_str = "UTF-8 / ASCII Metin (Plaintext HTTP Frame)"
+        enc_str = "Şifresiz (Plaintext - Ağ Dinlemeye ve MitM Saldırılarına Açık)"
+        mime_str = "application/json / text/html (REST / Web API)"
+        comp_str = "Gzip / Brotli / Deflate HTTP Aktarımı Desteklenir"
+        l6_learn = (
+            "Şifrelenmemiş metin protokolü; tüm istek ve yanıt gövdeleri Katman 6'da açık metin (plaintext) "
+            "olarak iletilir. Güvenlik için HTTPS zorunlu kılınmalıdır."
+        )
+    elif is_dns:
+        encoding_str = "RFC 1035 İkili DNS Wire Formatı"
+        enc_str = "Şifresiz UDP/53 (DoH/DoT Değil)"
+        mime_str = "application/dns-message"
+        comp_str = "DNS İsim Sıkıştırması (Pointer Offset 0xc0)"
+        l6_learn = "DNS sorgu ve yanıtları RFC 1035 standartlarına göre ikili (binary) formatta paketlenir. Alan adları etiket uzunluklarıyla dizilir."
+    elif is_ssh:
+        encoding_str = "SSH-2.0 Binary Packet Protocol (RFC 4253)"
+        enc_str = "Kriptolu (ChaCha20-Poly1305 / AES-256-CTR)"
+        mime_str = "application/x-ssh-payload"
+        comp_str = "none veya zlib@openssh.com"
+        l6_learn = "SSH protokolü ilk sürüm dizisinden sonra tüm komut ve terminal oturum yükünü güçlü simetrik şifrelemeyle Katman 6'da gizler."
+    else:
+        encoding_str = "ASCII / Binary Veri" if payload_hex else "Yüksüz Kontrol Paketi (Sadece Başlıklar)"
+        enc_str = "Ham Veri (Şifresiz)"
+        mime_str = "application/octet-stream"
+        comp_str = "Uygulanmamış (Ham Baytlar)"
+        l6_learn = "Katman 6 verinin formatlanması, karakter seti kodlaması (Encoding) ve serileştirilmesinden sorumludur."
 
     return {
+        "layer1": {
+            "title": "Katman 1 - Fiziksel (Physical / Bit & Sinyal)",
+            "iface": iface_name,
+            "mtu": mtu,
+            "speed": speed_str,
+            "medium": medium_type,
+            "status": "Aktif (Link UP)" if getattr(st, "isup", True) else "Bağlantı Yok (DOWN)",
+            "learn": (
+                f"Fiziksel katman veriyi kablo veya radyo dalgaları üzerinden bit (0 ve 1) dizisi olarak iletir. "
+                f"Ağ arabirimi ({iface_name}), MTU ({mtu} bayt) boyutuyla tek seferde fiziksel hatta basılabilecek azami çerçeve boyutunu belirler."
+            ),
+        },
         "layer2": {
-            "title": "Katman 2 - Veri Bağı (Data Link / Ethernet)",
+            "title": "Katman 2 - Veri Bağı (Data Link / Ethernet Frame)",
             "src_mac": pkt.get("src_mac") or "00:00:00:00:00:00",
             "dst_mac": pkt.get("dst_mac") or "00:00:00:00:00:00",
             "eth_type": pkt.get("eth_type", "IPv4 (0x0800)"),
+            "frame_size": f"{pkt.get('length', 64) + 14} Bayt (Ethernet Başlığı Dahil)",
             "learn": "Yerel ağda (LAN / VLAN / Docker Bridge) paketlerin hangi fiziksel/sanal ağ kartından hangisine gideceğini MAC adresleriyle belirler.",
         },
         "layer3": {
-            "title": "Katman 3 - Ağ (Network / IP)",
+            "title": "Katman 3 - Ağ (Network / IP & Yönlendirme)",
             "src_ip": pkt.get("src_ip", ""),
             "dst_ip": pkt.get("dst_ip", ""),
             "ip_version": f"IPv{pkt.get('ip_version', 4)}",
@@ -188,7 +326,7 @@ def build_osi_explanation(pkt: Dict[str, Any]) -> Dict[str, Any]:
             "ack_num": pkt.get("ack_num", 0),
             "window_size": pkt.get("window_size", 0),
             "learn": (
-                "TCP bağlantılı ve güvenilirdir (sıra numarası, ACK onayı ve akış kontrolü kullanır)."
+                "TCP bağlantılı ve güvenilirdir (sıra numarası, ACK onayı ve pencere akış kontrolü kullanır)."
                 if proto == "TCP"
                 else (
                     "UDP bağlantısızdır; el sıkışma yapmaz, düşük gecikme isteyen DNS, oyun ve ses/video akışlarında tercih edilir."
@@ -196,6 +334,25 @@ def build_osi_explanation(pkt: Dict[str, Any]) -> Dict[str, Any]:
                     else "ICMP ağ teşhis ve kontrol mesajları (Ping Echo Request/Reply, Destination Unreachable) taşır."
                 )
             ),
+        },
+        "layer5": {
+            "title": "Katman 5 - Oturum (Session / Bağlantı & Durum)",
+            "session_id": session_tuple,
+            "session_phase": session_phase,
+            "dialogue_mode": dialogue,
+            "process": pkt.get("process_name") or pkt.get("container_name") or "İşletim Sistemi Çekirdeği",
+            "learn": (
+                "Katman 5, iki uç nokta arasındaki iletişim oturumunun kurulmasını, senkronize edilmesini ve "
+                "düzgün sonlandırılmasını (Graceful Close) yönetir. Soketlerin açık kalması (Keep-Alive) ve el sıkışma oturum durumu burada koordine edilir."
+            ),
+        },
+        "layer6": {
+            "title": "Katman 6 - Sunum (Presentation / Şifreleme & Kodlama)",
+            "encoding": encoding_str,
+            "encryption": enc_str,
+            "mime_type": mime_str,
+            "compression": comp_str,
+            "learn": l6_learn,
         },
         "layer7": {
             "title": f"Katman 7 - Uygulama (Application / {l7})",

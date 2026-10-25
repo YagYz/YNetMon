@@ -10,3 +10,5 @@ data/*.pcap
 .env
 .vscode/
 .idea/
+*.jpg
+*.jpeg
