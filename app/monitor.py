@@ -47,6 +47,9 @@ class NetworkMonitor:
         self._port_scan_tracker: Dict[str, Set[int]] = defaultdict(set)
         self._port_scan_reset: float = time.time()
         self._alert_cooldown: Dict[str, float] = {}
+        self._last_docker_refresh: float = 0.0
+        self._last_local_ips_time: float = 0.0
+        self._pid_cache: Dict[int, Tuple[float, str]] = {}
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -461,16 +464,18 @@ class NetworkMonitor:
         conns_out: List[Dict[str, Any]] = []
         now = time.time()
 
-        # Refresh local IPs
-        new_local_ips: Set[str] = {"127.0.0.1", "::1"}
-        try:
-            for _, addrs in psutil.net_if_addrs().items():
-                for a in addrs:
-                    if a.family in (socket.AF_INET, socket.AF_INET6) and a.address:
-                        new_local_ips.add(a.address.split("%")[0])
-        except Exception:
-            pass
-        self.local_ips = new_local_ips
+        # Refresh local IPs every 30s instead of every 1s
+        if now - self._last_local_ips_time > 30.0 or not self.local_ips:
+            new_local_ips: Set[str] = {"127.0.0.1", "::1"}
+            try:
+                for _, addrs in psutil.net_if_addrs().items():
+                    for a in addrs:
+                        if a.family in (socket.AF_INET, socket.AF_INET6) and a.address:
+                            new_local_ips.add(a.address.split("%")[0])
+            except Exception:
+                pass
+            self.local_ips = new_local_ips
+            self._last_local_ips_time = now
 
         try:
             conns = psutil.net_connections(kind="inet")
@@ -500,10 +505,15 @@ class NetworkMonitor:
             status = c.status if proto == "TCP" else "STATELESS"
             proc_name = ""
             if c.pid:
-                try:
-                    proc_name = psutil.Process(c.pid).name()
-                except Exception:
-                    proc_name = f"pid:{c.pid}"
+                cached = self._pid_cache.get(c.pid)
+                if cached and (now - cached[0] < 15.0):
+                    proc_name = cached[1]
+                else:
+                    try:
+                        proc_name = psutil.Process(c.pid).name()
+                    except Exception:
+                        proc_name = f"pid:{c.pid}"
+                    self._pid_cache[c.pid] = (now, proc_name)
 
             container = (
                 self.ip_to_container.get(laddr_ip)
@@ -579,88 +589,119 @@ class NetworkMonitor:
 
         self.active_connections = conns_out[:150]
 
-    def refresh_docker_containers(self) -> List[Dict[str, Any]]:
+    def _query_docker_engine(self) -> Optional[List[Dict[str, Any]]]:
+        sock_path = "/var/run/docker.sock"
+        if not os.path.exists(sock_path):
+            return None
+        try:
+            import http.client
+
+            class UnixConn(http.client.HTTPConnection):
+                def __init__(conn_self):
+                    super().__init__("localhost")
+
+                def connect(conn_self):
+                    conn_self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    conn_self.sock.settimeout(2.0)
+                    conn_self.sock.connect(sock_path)
+
+            conn = UnixConn()
+            try:
+                conn.request("GET", "/containers/json")
+                resp = conn.getresponse()
+                if resp.status == 200:
+                    return json.loads(resp.read().decode("utf-8"))
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        return None
+
+    def refresh_docker_containers(self, force: bool = False) -> List[Dict[str, Any]]:
+        now = time.time()
+        if not force and (now - self._last_docker_refresh < 4.0) and self.docker_containers:
+            return self.docker_containers
+
         containers: List[Dict[str, Any]] = []
         ip_map: Dict[str, str] = {}
         port_map: Dict[int, str] = {}
-        try:
-            ps_out = subprocess.check_output(
-                ["docker", "ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}"],
-                stderr=subprocess.DEVNULL,
-                timeout=3.0,
-                text=True,
-            ).strip()
-            if not ps_out:
-                self.docker_containers = []
-                return []
 
-            stats_map: Dict[str, str] = {}
-            try:
-                st_out = subprocess.check_output(
-                    ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.NetIO}}|{{.CPUPerc}}|{{.MemUsage}}"],
-                    stderr=subprocess.DEVNULL,
-                    timeout=4.0,
-                    text=True,
-                ).strip()
-                for line in st_out.splitlines():
-                    parts = line.split("|")
-                    if len(parts) >= 4:
-                        stats_map[parts[0]] = f"Net: {parts[1]} | CPU: {parts[2]} | RAM: {parts[3]}"
-            except Exception:
-                pass
-
-            for line in ps_out.splitlines():
-                cid, name, image, status, ports_str = (line.split("|") + ["", "", "", "", ""])[:5]
-                if not cid or not all(ch in "0123456789abcdef" for ch in cid.lower()):
-                    continue
-                ips: List[str] = []
-                net_mode = "bridge"
-                try:
-                    insp_raw = subprocess.check_output(
-                        ["docker", "inspect", "--", cid],
-                        stderr=subprocess.DEVNULL,
-                        timeout=2.0,
-                        text=True,
-                    )
-                    insp = json.loads(insp_raw)[0]
-                    net_mode = insp.get("HostConfig", {}).get("NetworkMode", "bridge")
-                    nets = insp.get("NetworkSettings", {}).get("Networks", {})
-                    for _, ninfo in nets.items():
-                        ip_addr = ninfo.get("IPAddress")
-                        if ip_addr:
-                            ips.append(ip_addr)
-                            ip_map[ip_addr] = name
-                    port_bindings = insp.get("NetworkSettings", {}).get("Ports", {}) or {}
-                    for p_key, binds in port_bindings.items():
-                        p_num = int(p_key.split("/")[0])
-                        port_map[p_num] = name
-                        if binds:
-                            for b in binds:
-                                hp = b.get("HostPort")
-                                if hp and str(hp).isdigit():
-                                    port_map[int(hp)] = name
-                except Exception:
-                    pass
-
-                st_line = stats_map.get(name, "Net: 0B / 0B")
+        raw_list = self._query_docker_engine()
+        if raw_list is not None:
+            for c in raw_list:
+                cid = (c.get("Id") or "")[:12]
+                name = (c.get("Names") or [""])[0].lstrip("/")
+                image = c.get("Image", "")
+                status = c.get("Status", "")
+                net_settings = c.get("NetworkSettings", {}) or {}
+                networks = net_settings.get("Networks", {}) or {}
+                ips = [ninfo.get("IPAddress") for ninfo in networks.values() if ninfo.get("IPAddress")]
+                net_mode = list(networks.keys())[0] if networks else "bridge"
+                for ip_addr in ips:
+                    ip_map[ip_addr] = name
+                ports = c.get("Ports") or []
+                port_parts = []
+                for p in ports:
+                    pub = p.get("PublicPort")
+                    priv = p.get("PrivatePort")
+                    ptype = p.get("Type", "tcp")
+                    if pub:
+                        port_map[pub] = name
+                        port_parts.append(f"{pub}->{priv}/{ptype}")
+                    elif priv:
+                        port_map[priv] = name
+                        port_parts.append(f"{priv}/{ptype}")
+                ports_str = ", ".join(port_parts) or "dahili"
                 containers.append(
                     {
-                        "id": cid[:12],
+                        "id": cid,
                         "name": name,
                         "image": image,
                         "status": status,
                         "network_mode": net_mode,
                         "ips": ips,
                         "ports": ports_str,
-                        "stats": st_line,
+                        "stats": f"Ağ: {net_mode} | Durum: {status}",
                     }
                 )
+            self.docker_containers = containers
+            self.ip_to_container = ip_map
+            self.port_to_container = port_map
+            self._last_docker_refresh = now
+            return containers
+
+        # Fallback if docker.sock not available but docker cli exists
+        try:
+            ps_out = subprocess.check_output(
+                ["docker", "ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}"],
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+                text=True,
+            ).strip()
+            if ps_out:
+                for line in ps_out.splitlines():
+                    cid, name, image, status, ports_str = (line.split("|") + ["", "", "", "", ""])[:5]
+                    if not cid:
+                        continue
+                    containers.append(
+                        {
+                            "id": cid[:12],
+                            "name": name,
+                            "image": image,
+                            "status": status,
+                            "network_mode": "bridge",
+                            "ips": [],
+                            "ports": ports_str,
+                            "stats": f"Durum: {status}",
+                        }
+                    )
         except Exception:
             pass
 
         self.docker_containers = containers
         self.ip_to_container = ip_map
         self.port_to_container = port_map
+        self._last_docker_refresh = now
         return containers
 
     def export_pcap(self, packets_list: List[Dict[str, Any]], filepath: str) -> str:

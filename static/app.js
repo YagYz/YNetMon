@@ -7,6 +7,7 @@ let currentPage = 1;
 let pageSize = 50;
 let totalPackets = 0;
 let isUserScrollingPackets = false;
+let lastTableReload = 0;
 
 function getCookie(name) {
   const parts = `; ${document.cookie}`.split(`; ${name}=`);
@@ -721,16 +722,19 @@ function connectWebSocket() {
     drawBandwidthChart();
 
     // Only auto-refresh DOM table if on Page 1, Live Stream checked, no active filters, and user is NOT scrolling down
+    const nowTs = Date.now();
     if (
       currentPage === 1 &&
       !isUserScrollingPackets &&
       document.getElementById("chkLiveStream").checked &&
       !hasActivePacketFilters() &&
       Array.isArray(msg.recent_packets) &&
-      msg.recent_packets.length > 0
+      msg.recent_packets.length > 0 &&
+      nowTs - lastTableReload >= 1500
     ) {
       const latestId = msg.recent_packets[0].id;
       if (!packetsCache.length || packetsCache[0].id !== latestId) {
+        lastTableReload = nowTs;
         loadPackets();
       }
     }
