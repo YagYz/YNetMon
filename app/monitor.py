@@ -109,7 +109,17 @@ class NetworkMonitor:
                 except Exception:
                     pass
 
-            iface_arg = None if self.selected_iface in ("all", "any", "") else self.selected_iface
+            if self.selected_iface in ("all", "any", ""):
+                all_stats = psutil.net_if_stats()
+                active_ifaces = [
+                    name
+                    for name, st in all_stats.items()
+                    if st.isup and name != "lo" and not name.startswith("veth")
+                ]
+                iface_arg = active_ifaces if active_ifaces else None
+            else:
+                iface_arg = self.selected_iface
+
             self.sniffer = AsyncSniffer(
                 iface=iface_arg,
                 prn=self._on_raw_packet,
@@ -166,6 +176,10 @@ class NetworkMonitor:
                 pkt_dict["src_mac"] = eth.src
                 pkt_dict["dst_mac"] = eth.dst
                 pkt_dict["eth_type"] = f"0x{eth.type:04x}"
+            else:
+                pkt_dict["src_mac"] = "L3/TUNNEL"
+                pkt_dict["dst_mac"] = "L3/TUNNEL"
+                pkt_dict["eth_type"] = "IPv4 (0x0800)" if scapy_pkt.haslayer(IP) else "IPv6 (0x86dd)"
 
             if scapy_pkt.haslayer(IP):
                 ip = scapy_pkt[IP]
@@ -183,15 +197,18 @@ class NetworkMonitor:
             else:
                 return
 
-            # Filter out noisy self WebSocket frames on port 8765 unless nothing else happens
+            # Filter out noisy self WebSocket frames on port 8765
             raw_payload = b""
             if scapy_pkt.haslayer(TCP):
                 tcp = scapy_pkt[TCP]
                 pkt_dict["protocol"] = "TCP"
                 pkt_dict["src_port"] = int(tcp.sport)
                 pkt_dict["dst_port"] = int(tcp.dport)
+                fl_str = str(tcp.flags)
+                # Ignore noisy continuous WebSocket frames on port 8765, allow SYN/FIN for visibility
                 if pkt_dict["src_port"] == 8765 or pkt_dict["dst_port"] == 8765:
-                    return
+                    if "S" not in fl_str and "F" not in fl_str and "R" not in fl_str:
+                        return
                 flag_map = [("S", "SYN"), ("A", "ACK"), ("P", "PSH"), ("F", "FIN"), ("R", "RST"), ("U", "URG")]
                 fl_str = str(tcp.flags)
                 pkt_dict["tcp_flags"] = ",".join(name for ch, name in flag_map if ch in fl_str)
