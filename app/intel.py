@@ -2,6 +2,7 @@ import ipaddress
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Set, Tuple
 
 # Known benign Cloud, CDN, Gaming (Steam/Valve), DNS, and VPN CIDR blocks
@@ -62,6 +63,7 @@ TRUSTED_LOCAL_CLIENT_PROCESSES = {
 
 _ptr_cache: Dict[str, Tuple[str, float]] = {}
 _ptr_lock = threading.Lock()
+_dns_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ynetmon_dns")
 
 
 def identify_ip_provider(ip_str: str) -> Dict[str, str]:
@@ -113,7 +115,7 @@ def resolve_ptr_background(ip_str: str) -> None:
         except Exception:
             pass
 
-    threading.Thread(target=_worker, daemon=True).start()
+    _dns_executor.submit(_worker)
 
 
 def is_steam_or_gaming_port(port: int) -> bool:

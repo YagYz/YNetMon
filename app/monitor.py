@@ -284,29 +284,44 @@ class NetworkMonitor:
 
         now = time.time()
         flags = pkt_dict.get("tcp_flags", "")
-        is_interesting = (
+        proto = pkt_dict.get("protocol", "TCP")
+        l7 = pkt_dict.get("l7_proto", "")
+        info = pkt_dict.get("info", "")
+
+        # Akıllı Filtreleme: Yalnızca adli/eğitici değeri olan kritik olayları kaydet
+        has_handshake = any(f in flags for f in ("SYN", "FIN", "RST"))
+        has_dns = l7 == "DNS"
+        has_sni = bool(pkt_dict.get("domain_sni"))
+        has_http_req = l7 == "HTTP" and any(m in info for m in ("GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "HTTP/1.", "HTTP/2."))
+        has_icmp = proto == "ICMP" or l7 == "ICMP"
+        is_suspicious = not decision.get("is_benign", True)
+
+        is_critical_event = (
             force_store
-            or bool(pkt_dict.get("domain_sni"))
-            or any(f in flags for f in ("SYN", "FIN", "RST"))
-            or pkt_dict.get("l7_proto") in ("DNS", "HTTP", "ICMP")
-            or not decision.get("is_benign", True)
+            or has_handshake
+            or has_dns
+            or has_sni
+            or has_http_req
+            or has_icmp
+            or is_suspicious
         )
 
-        if not is_interesting:
-            flow_key = (
-                pkt_dict.get("src_ip", ""),
-                int(pkt_dict.get("src_port") or 0),
-                pkt_dict.get("dst_ip", ""),
-                int(pkt_dict.get("dst_port") or 0),
-                pkt_dict.get("protocol", ""),
-            )
+        flow_key = (
+            pkt_dict.get("src_ip", ""),
+            int(pkt_dict.get("src_port") or 0),
+            pkt_dict.get("dst_ip", ""),
+            int(pkt_dict.get("dst_port") or 0),
+            proto,
+        )
+
+        if not is_critical_event:
             settings = get_settings()
-            dedup_sec = float(settings.get("flow_dedup_seconds", "30") or 30.0)
+            dedup_sec = float(settings.get("flow_dedup_seconds", "15") or 15.0)
             last_ts = self._seen_flows.get(flow_key, 0.0)
             if now - last_ts < dedup_sec:
                 record_device_traffic_only(pkt_dict)
                 return pkt_dict
-            if len(self._seen_flows) > 1500:
+            if len(self._seen_flows) > 2000:
                 self._seen_flows = {k: v for k, v in self._seen_flows.items() if now - v < 120.0}
             self._seen_flows[flow_key] = now
 

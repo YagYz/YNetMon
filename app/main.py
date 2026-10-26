@@ -31,6 +31,7 @@ from .auth import (
 from .database import (
     clear_alerts_db,
     clear_packets_db,
+    flush_all_buffers,
     get_alerts,
     get_device_stats,
     get_packet_by_id,
@@ -123,6 +124,11 @@ async def lifespan(app: FastAPI):
     bg_task = asyncio.create_task(_background_sampler())
     yield
     bg_task.cancel()
+    try:
+        await bg_task
+    except asyncio.CancelledError:
+        pass
+    await asyncio.to_thread(flush_all_buffers)
 
 
 async def _background_sampler() -> None:
@@ -132,7 +138,9 @@ async def _background_sampler() -> None:
             await asyncio.to_thread(monitor.sample_metrics)
             if tick % 5 == 0:
                 await asyncio.to_thread(monitor.refresh_docker_containers)
-            if tick % 60 == 0 and tick > 0:
+            if tick % 30 == 0 and tick > 0:
+                await asyncio.to_thread(flush_all_buffers)
+            if tick % 1800 == 0 and tick > 0:
                 await asyncio.to_thread(run_db_maintenance)
             tick += 1
         except Exception:
@@ -491,11 +499,11 @@ async def api_update_settings(
         if k == "max_stored_packets" and val_str:
             try:
                 mp_val = int(val_str)
-                if not (100 <= mp_val <= 10000):
+                if not (100 <= mp_val <= 200000):
                     raise ValueError()
                 val_str = str(mp_val)
             except ValueError:
-                raise HTTPException(status_code=400, detail="Maksimum paket kaydı 100 ile 10000 arasında olmalıdır.")
+                raise HTTPException(status_code=400, detail="Maksimum paket kaydı 100 ile 200000 arasında olmalıdır.")
         if k == "retention_hours" and val_str:
             try:
                 rh_val = float(val_str)
