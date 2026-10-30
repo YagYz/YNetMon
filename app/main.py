@@ -31,6 +31,7 @@ from .auth import (
 from .database import (
     clear_alerts_db,
     clear_packets_db,
+    delete_device_db,
     get_alerts,
     get_device_stats,
     get_packet_by_id,
@@ -40,6 +41,7 @@ from .database import (
     init_db,
     query_packets,
     run_db_maintenance,
+    update_device_name_db,
     update_settings,
 )
 from .inspector import (
@@ -404,13 +406,42 @@ async def api_connections(sess: Dict[str, str] = Depends(require_auth)) -> Dict[
     return {"connections": monitor.active_connections, "count": len(monitor.active_connections)}
 
 
+class DeviceNameUpdate(BaseModel):
+    name: str = Field(..., max_length=64)
+
+
 @app.get("/api/devices")
 async def api_devices(
     search: Optional[str] = None,
+    filter: Optional[str] = None,
     sess: Dict[str, str] = Depends(require_auth),
 ) -> Dict[str, Any]:
-    devices = await asyncio.to_thread(get_device_stats, 100, search)
-    return {"devices": devices}
+    devices = await asyncio.to_thread(get_device_stats, 200, search, filter)
+    active_count = sum(1 for d in devices if d.get("is_online"))
+    return {"devices": devices, "count": len(devices), "active_count": active_count}
+
+
+@app.post("/api/devices/{ip}/name")
+async def api_update_device_name(
+    ip: str,
+    body: DeviceNameUpdate,
+    sess: Dict[str, str] = Depends(require_auth),
+) -> Dict[str, Any]:
+    ok = await asyncio.to_thread(update_device_name_db, ip, body.name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Cihaz bulunamadı.")
+    return {"ok": True, "ip": ip, "name": body.name}
+
+
+@app.delete("/api/devices/{ip}")
+async def api_delete_device(
+    ip: str,
+    sess: Dict[str, str] = Depends(require_auth),
+) -> Dict[str, Any]:
+    ok = await asyncio.to_thread(delete_device_db, ip)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Cihaz bulunamadı.")
+    return {"ok": True, "ip": ip}
 
 
 @app.get("/api/docker")

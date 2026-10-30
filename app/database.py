@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 import sqlite3
@@ -5,11 +6,33 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from .intel import identify_mac_vendor
+
 DB_PATH = os.environ.get("YNETMON_DB", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ynetmon.db"))
 _write_lock = threading.Lock()
 _device_buffer_lock = threading.Lock()
 _device_buffer: Dict[str, Dict[str, Any]] = {}
 _last_device_flush: float = time.time()
+_TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
+
+
+def is_lan_ip(ip_str: str) -> bool:
+    """Validate whether an IP belongs to a local LAN subnet, private RFC 1918 range, or Tailscale mesh."""
+    if not ip_str or not isinstance(ip_str, str):
+        return False
+    ip_clean = ip_str.strip()
+    if ip_clean in ("255.255.255.255", "0.0.0.0", "::") or ip_clean.endswith(".255"):
+        return False
+    try:
+        ip = ipaddress.ip_address(ip_clean)
+        if ip.is_loopback or ip.is_multicast or ip.is_unspecified or ip.is_reserved or ip.is_link_local:
+            return False
+        if ip.is_private or ip in _TAILSCALE_NET:
+            return True
+        return False
+    except Exception:
+        return False
+
 
 
 def get_conn() -> sqlite3.Connection:
@@ -147,6 +170,32 @@ def init_db() -> None:
         # Remove historic false-positive alerts caused by Steam (155.133.x.x) or own outbound IP
         cur.execute("DELETE FROM alerts WHERE src_ip LIKE '155.133.%' OR src_ip LIKE '162.254.%'")
 
+        # Purge non-LAN/WAN IPs, broadcast, multicast, and link-local fe80 records from device_stats
+        cur.execute("""
+            DELETE FROM device_stats
+            WHERE ip NOT LIKE '192.168.%'
+              AND ip NOT LIKE '10.%'
+              AND ip NOT LIKE '172.16.%'
+              AND ip NOT LIKE '172.17.%'
+              AND ip NOT LIKE '172.18.%'
+              AND ip NOT LIKE '172.19.%'
+              AND ip NOT LIKE '172.20.%'
+              AND ip NOT LIKE '172.21.%'
+              AND ip NOT LIKE '172.22.%'
+              AND ip NOT LIKE '172.23.%'
+              AND ip NOT LIKE '172.24.%'
+              AND ip NOT LIKE '172.25.%'
+              AND ip NOT LIKE '172.26.%'
+              AND ip NOT LIKE '172.27.%'
+              AND ip NOT LIKE '172.28.%'
+              AND ip NOT LIKE '172.29.%'
+              AND ip NOT LIKE '172.30.%'
+              AND ip NOT LIKE '172.31.%'
+              AND ip NOT LIKE '100.%'
+        """)
+        cur.execute("DELETE FROM device_stats WHERE ip LIKE 'fe80:%' OR ip LIKE '%.255' OR ip IN ('255.255.255.255', '0.0.0.0', '::')")
+        cur.execute("UPDATE device_stats SET container_name = '' WHERE (ip LIKE '192.168.%' OR ip LIKE '100.%') AND container_name = 'adguard-home'")
+
         # Clean expired sessions on startup
         cur.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         conn.commit()
@@ -264,7 +313,7 @@ def buffer_device_traffic(
     proto: str,
     now: float,
 ) -> None:
-    if not ip or ip.startswith("127.") or ip == "::1":
+    if not is_lan_ip(ip):
         return
     with _device_buffer_lock:
         dev = _device_buffer.get(ip)
@@ -280,9 +329,9 @@ def buffer_device_traffic(
                 "last_seen": now,
             }
         else:
-            if mac and not dev["mac"]:
+            if mac and (not dev["mac"] or dev["mac"] == "L3/TUNNEL"):
                 dev["mac"] = mac
-            if container and not dev["container"]:
+            if container:
                 dev["container"] = container
             dev["b_sent"] += b_sent
             dev["b_recv"] += b_recv
@@ -385,12 +434,13 @@ def insert_packet(pkt: Dict[str, Any]) -> int:
     proto = pkt.get("l7_proto") or pkt.get("protocol") or "OTHER"
     src_ip = pkt.get("src_ip", "")
     dst_ip = pkt.get("dst_ip", "")
-    container = pkt.get("container_name", "")
+    src_container = pkt.get("src_container", "")
+    dst_container = pkt.get("dst_container", "")
 
-    if src_ip:
-        buffer_device_traffic(src_ip, pkt.get("src_mac", ""), container, length, 0, 1, 0, proto, now)
-    if dst_ip:
-        buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), container, 0, length, 0, 1, proto, now)
+    if src_ip and is_lan_ip(src_ip):
+        buffer_device_traffic(src_ip, pkt.get("src_mac", ""), src_container, length, 0, 1, 0, proto, now)
+    if dst_ip and is_lan_ip(dst_ip):
+        buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), dst_container, 0, length, 0, 1, proto, now)
 
     if now - _last_device_flush > 5.0 or len(_device_buffer) > 40:
         flush_device_buffer()
@@ -405,11 +455,13 @@ def record_device_traffic_only(pkt: Dict[str, Any]) -> None:
     proto = pkt.get("l7_proto") or pkt.get("protocol") or "OTHER"
     src_ip = pkt.get("src_ip", "")
     dst_ip = pkt.get("dst_ip", "")
-    container = pkt.get("container_name", "")
-    if src_ip:
-        buffer_device_traffic(src_ip, pkt.get("src_mac", ""), container, length, 0, 1, 0, proto, now)
-    if dst_ip:
-        buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), container, 0, length, 0, 1, proto, now)
+    src_container = pkt.get("src_container", "")
+    dst_container = pkt.get("dst_container", "")
+
+    if src_ip and is_lan_ip(src_ip):
+        buffer_device_traffic(src_ip, pkt.get("src_mac", ""), src_container, length, 0, 1, 0, proto, now)
+    if dst_ip and is_lan_ip(dst_ip):
+        buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), dst_container, 0, length, 0, 1, proto, now)
     if now - _last_device_flush > 5.0 or len(_device_buffer) > 40:
         flush_device_buffer()
 
@@ -426,7 +478,9 @@ def _upsert_device(
     proto: str,
     now: float,
 ) -> None:
-    cur.execute("SELECT protocols, container_name, mac FROM device_stats WHERE ip = ?", (ip,))
+    if not is_lan_ip(ip):
+        return
+    cur.execute("SELECT protocols, container_name, mac, hostname FROM device_stats WHERE ip = ?", (ip,))
     row = cur.fetchone()
     if row is None:
         cur.execute(
@@ -445,7 +499,7 @@ def _upsert_device(
             existing_protos.add(proto)
         new_protos = ",".join(sorted(existing_protos))
         new_container = container if container else (row["container_name"] or "")
-        new_mac = mac if mac else (row["mac"] or "")
+        new_mac = mac if (mac and mac != "L3/TUNNEL") else (row["mac"] or mac)
         cur.execute(
             """
             UPDATE device_stats
@@ -528,33 +582,94 @@ def get_packet_by_id(pkt_id: int) -> Optional[Dict[str, Any]]:
     return d
 
 
-def get_device_stats(limit: int = 100, search: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_device_stats(
+    limit: int = 100,
+    search: Optional[str] = None,
+    filter_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     flush_device_buffer()
+    now = time.time()
     conn = get_conn()
     cur = conn.cursor()
+
+    sql = """
+        SELECT *, (bytes_sent + bytes_recv) AS total_bytes
+        FROM device_stats
+        WHERE 1=1
+    """
+    params: List[Any] = []
+
     if search:
         s_val = f"%{search[:64]}%"
-        cur.execute(
-            """
-            SELECT *, (bytes_sent + bytes_recv) AS total_bytes
-            FROM device_stats
-            WHERE ip LIKE ? OR container_name LIKE ? OR protocols LIKE ?
-            ORDER BY total_bytes DESC LIMIT ?
-            """,
-            (s_val, s_val, s_val, limit),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT *, (bytes_sent + bytes_recv) AS total_bytes
-            FROM device_stats
-            ORDER BY total_bytes DESC LIMIT ?
-            """,
-            (limit,),
-        )
-    rows = [dict(r) for r in cur.fetchall()]
+        sql += " AND (ip LIKE ? OR hostname LIKE ? OR container_name LIKE ? OR protocols LIKE ?)"
+        params.extend([s_val, s_val, s_val, s_val])
+
+    if filter_type == "active":
+        sql += " AND last_seen > ?"
+        params.append(now - 900.0)
+    elif filter_type == "docker":
+        sql += " AND container_name != ''"
+    elif filter_type == "lan":
+        sql += " AND (ip LIKE '192.168.%' OR ip LIKE '10.%') AND container_name = ''"
+
+    sql += " ORDER BY last_seen DESC LIMIT ?"
+    params.append(min(500, max(1, limit)))
+
+    cur.execute(sql, tuple(params))
+    raw_rows = cur.fetchall()
     conn.close()
-    return rows
+
+    out = []
+    for r in raw_rows:
+        d = dict(r)
+        last_s = float(d.get("last_seen") or 0.0)
+        is_online = (now - last_s) < 900.0
+        mac = d.get("mac") or ""
+        container = d.get("container_name") or ""
+        ip = d.get("ip") or ""
+
+        # Vendor or Device Type Identification
+        vendor = identify_mac_vendor(mac)
+        if container:
+            device_type = "Docker Container"
+        elif ip.startswith("100."):
+            device_type = "Tailscale / VPN"
+        elif ip == "192.168.1.1":
+            device_type = "Ağ Ağ Geçidi (Router)"
+        elif ip == "192.168.1.150":
+            device_type = "Debian Ana Sunucu"
+        else:
+            device_type = "LAN Cihazı"
+
+        d["is_online"] = is_online
+        d["status_text"] = "Aktif" if is_online else "Çevrimdışı"
+        d["vendor"] = vendor
+        d["device_type"] = device_type
+        out.append(d)
+
+    return out
+
+
+def update_device_name_db(ip: str, custom_name: str) -> bool:
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE device_stats SET hostname = ? WHERE ip = ?", (custom_name.strip()[:64], ip))
+        changed = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return changed
+
+
+def delete_device_db(ip: str) -> bool:
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM device_stats WHERE ip = ?", (ip,))
+        changed = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return changed
 
 
 def insert_alert(
@@ -631,7 +746,7 @@ def run_db_maintenance() -> Dict[str, Any]:
             (max_pkts,),
         )
         cur.execute(
-            "DELETE FROM device_stats WHERE ip NOT IN (SELECT ip FROM device_stats ORDER BY last_seen DESC LIMIT 1000)"
+            "DELETE FROM device_stats WHERE ip NOT IN (SELECT ip FROM device_stats ORDER BY last_seen DESC LIMIT 300)"
         )
         cur.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         conn.commit()
@@ -645,12 +760,16 @@ def run_db_maintenance() -> Dict[str, Any]:
 
 
 def get_storage_stats() -> Dict[str, Any]:
+    flush_device_buffer()
+    now = time.time()
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) AS p_cnt FROM packets")
     p_cnt = int(cur.fetchone()["p_cnt"])
-    cur.execute("SELECT COUNT(*) AS d_cnt FROM device_stats")
-    d_cnt = int(cur.fetchone()["d_cnt"])
+    cur.execute("SELECT COUNT(*) AS active_cnt FROM device_stats WHERE last_seen > ?", (now - 900.0,))
+    active_d_cnt = int(cur.fetchone()["active_cnt"] or 0)
+    cur.execute("SELECT COUNT(*) AS total_cnt FROM device_stats")
+    total_d_cnt = int(cur.fetchone()["total_cnt"] or 0)
     cur.execute("SELECT COUNT(*) AS a_cnt FROM alerts")
     a_cnt = int(cur.fetchone()["a_cnt"])
     conn.close()
@@ -667,7 +786,9 @@ def get_storage_stats() -> Dict[str, Any]:
         "db_size_bytes": total_bytes,
         "db_size_mb": round(total_bytes / (1024 * 1024), 2),
         "packets_count": p_cnt,
-        "devices_count": d_cnt,
+        "devices_count": active_d_cnt,
+        "active_devices_count": active_d_cnt,
+        "total_devices_count": total_d_cnt,
         "alerts_count": a_cnt,
     }
 

@@ -263,13 +263,16 @@ class NetworkMonitor:
                 pkt_dict["payload_hex"] = p_hex
                 pkt_dict["payload_ascii"] = p_asc
 
-            pkt_dict["container_name"] = (
-                self.ip_to_container.get(pkt_dict["src_ip"])
-                or self.ip_to_container.get(pkt_dict["dst_ip"])
-                or self.port_to_container.get(sport)
-                or self.port_to_container.get(dport)
-                or ""
-            )
+            src_c = self.ip_to_container.get(pkt_dict["src_ip"], "")
+            dst_c = self.ip_to_container.get(pkt_dict["dst_ip"], "")
+            if not src_c and sport in self.port_to_container:
+                src_c = self.port_to_container[sport]
+            if not dst_c and dport in self.port_to_container:
+                dst_c = self.port_to_container[dport]
+
+            pkt_dict["src_container"] = src_c
+            pkt_dict["dst_container"] = dst_c
+            pkt_dict["container_name"] = src_c or dst_c or ""
             pkt_dict["osi"] = build_osi_explanation(pkt_dict)
             self.record_packet(pkt_dict)
         except Exception:
@@ -581,6 +584,8 @@ class NetworkMonitor:
                         "info": f"[Aktif Soket Akışı] {proc_name or 'uygulama'}: {laddr_ip}:{laddr_port} -> {raddr_ip}:{raddr_port} ({status})",
                         "payload_hex": p_hex,
                         "payload_ascii": p_asc,
+                        "src_container": self.ip_to_container.get(laddr_ip, ""),
+                        "dst_container": self.ip_to_container.get(raddr_ip, ""),
                         "container_name": container,
                         "process_name": proc_name,
                     }
