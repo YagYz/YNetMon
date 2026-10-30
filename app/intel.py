@@ -238,3 +238,104 @@ def evaluate_traffic_decision(
         "provider": provider_name,
         "reason": " | ".join(reasons),
     }
+
+
+COMMON_MAC_VENDORS: Dict[str, str] = {
+    # Network Equipment & Routers
+    "e0:9d:1e": "Keenetic Limited (Modem/Router)",
+    "00:1d:aa": "Keenetic / ZyXEL",
+    "00:31:92": "Keenetic",
+    "f0:79:59": "TP-Link Technologies",
+    "50:c7:bf": "TP-Link",
+    "c0:06:c3": "TP-Link",
+    "98:48:27": "TP-Link",
+    "50:eb:f6": "ASUSTek Computer",
+    "04:d9:f5": "ASUSTek Computer",
+    "00:11:32": "Synology Inc.",
+    "bc:24:11": "Synology Inc.",
+    "24:5a:4c": "Ubiquiti Networks",
+    "dc:9f:db": "Ubiquiti Networks",
+    "b4:fb:e4": "Ubiquiti Networks",
+    "78:8a:20": "Ubiquiti Networks",
+    "e4:38:83": "MikroTik",
+    "cc:2d:e0": "MikroTik",
+    "48:8f:5a": "MikroTik",
+
+    # Apple Devices
+    "b0:25:aa": "Apple, Inc.",
+    "f0:18:98": "Apple, Inc.",
+    "a4:83:e7": "Apple, Inc.",
+    "3c:22:fb": "Apple, Inc.",
+    "a8:66:7f": "Apple, Inc.",
+    "dc:a9:04": "Apple, Inc.",
+    "38:f9:d3": "Apple, Inc.",
+    "60:f4:45": "Apple, Inc.",
+    "ac:bc:32": "Apple, Inc.",
+    "f8:ff:c2": "Apple, Inc.",
+    "7c:04:d0": "Apple, Inc.",
+
+    # Intel & PC Motherboards
+    "88:e9:fe": "Intel Corporate",
+    "00:1b:21": "Intel Corporate",
+    "34:17:eb": "Intel Corporate",
+    "d8:50:e6": "Micro-Star / ECS (Homelab)",
+    "00:e0:4c": "Realtek Semiconductor",
+    "b8:85:84": "Realtek Semiconductor",
+    "74:da:88": "Realtek Semiconductor",
+    "70:85:c2": "ASRock Incorporation",
+    "04:42:1a": "Gigabyte Technology",
+
+    # Mobile, IoT & SBC
+    "c4:07:2f": "Xiaomi Communications",
+    "64:a2:00": "Xiaomi",
+    "28:6c:07": "Xiaomi",
+    "dc:a6:32": "Raspberry Pi Foundation",
+    "b8:27:eb": "Raspberry Pi",
+    "e4:5f:01": "Raspberry Pi",
+    "28:cd:c1": "Raspberry Pi",
+    "ec:fa:bc": "Espressif Inc (ESP32/ESP8266 IoT)",
+    "84:f3:eb": "Espressif Inc (IoT)",
+    "24:6f:28": "Espressif Inc (IoT)",
+    "5c:cf:7f": "Espressif Inc (IoT)",
+    "40:22:d8": "Espressif Inc (IoT)",
+    "30:ae:a4": "Espressif Inc (IoT)",
+    "24:0a:c4": "Espressif Inc (IoT)",
+    "68:b6:b3": "Espressif Inc (IoT)",
+    "08:3a:88": "Espressif Inc (IoT)",
+
+    # Virtualization
+    "00:50:56": "VMware Virtual NIC",
+    "00:0c:29": "VMware Virtual NIC",
+    "52:54:00": "QEMU / KVM Virtual NIC",
+    "00:15:5d": "Microsoft Hyper-V Virtual NIC",
+}
+
+
+def identify_mac_vendor(mac: str) -> str:
+    """Identify device manufacturer or hardware type from MAC address."""
+    if not mac or not isinstance(mac, str):
+        return "-"
+    mac_clean = mac.strip().lower()
+    if mac_clean == "l3/tunnel":
+        return "Tailscale / VPN Tüneli"
+    if mac_clean.startswith("02:42:"):
+        return "Docker Sanal Ağ Arayüzü"
+    if mac_clean in ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"):
+        return "Yayın (Broadcast) / Tanımsız"
+
+    # Match exact 3-byte OUI prefix
+    if len(mac_clean) >= 8:
+        prefix = mac_clean[:8]
+        if prefix in COMMON_MAC_VENDORS:
+            return COMMON_MAC_VENDORS[prefix]
+
+    # Check IEEE 802 locally administered / randomized bit (used by mobile privacy MACs)
+    try:
+        first_byte = int(mac_clean[:2], 16)
+        if first_byte & 0x02 != 0:
+            return "Özel / Rastgele MAC (Mobil Cihaz)"
+    except Exception:
+        pass
+
+    return "Ağ Arayüzü"
+

@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 import sqlite3
@@ -5,25 +6,42 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from .intel import identify_mac_vendor
+
 DB_PATH = os.environ.get("YNETMON_DB", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ynetmon.db"))
 _write_lock = threading.Lock()
 _device_buffer_lock = threading.Lock()
 _device_buffer: Dict[str, Dict[str, Any]] = {}
 _last_device_flush: float = time.time()
-
 _packet_buffer_lock = threading.Lock()
 _packet_buffer: List[Dict[str, Any]] = []
 _last_packet_flush: float = time.time()
-_next_pkt_id: int = 1
-BATCH_PACKET_LIMIT: int = 1000
-FLUSH_INTERVAL_SECONDS: float = 30.0
+_last_pkt_seq: int = 0
+_TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
+
+
+def is_lan_ip(ip_str: str) -> bool:
+    """Validate whether an IP belongs to a local LAN subnet, private RFC 1918 range, or Tailscale mesh."""
+    if not ip_str or not isinstance(ip_str, str):
+        return False
+    ip_clean = ip_str.strip()
+    if ip_clean in ("255.255.255.255", "0.0.0.0", "::") or ip_clean.endswith(".255"):
+        return False
+    try:
+        ip = ipaddress.ip_address(ip_clean)
+        if ip.is_loopback or ip.is_multicast or ip.is_unspecified or ip.is_reserved or ip.is_link_local:
+            return False
+        if ip.is_private or ip in _TAILSCALE_NET:
+            return True
+        return False
+    except Exception:
+        return False
+
 
 
 def get_conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA temp_store=MEMORY;")
@@ -31,10 +49,11 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    global _next_pkt_id
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA auto_vacuum=INCREMENTAL;")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -143,24 +162,53 @@ def init_db() -> None:
             "bandwidth_threshold_mbps": "50.0",
             "port_scan_threshold": "15",
             "enable_notifications": "true",
-            "max_stored_packets": "50000",
-            "retention_hours": "72",
-            "flow_dedup_seconds": "15",
+            "max_stored_packets": "5000",
+            "retention_hours": "24",
+            "flow_dedup_seconds": "5",
         }
         for k, v in defaults.items():
             cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-        cur.execute("UPDATE settings SET value = '50000' WHERE key = 'max_stored_packets' AND value IN ('2000', '5000')")
-        cur.execute("UPDATE settings SET value = '15' WHERE key = 'flow_dedup_seconds' AND value IN ('5', '30')")
+        cur.execute("UPDATE settings SET value = '5000' WHERE key = 'max_stored_packets' AND value = '2000'")
+        cur.execute("UPDATE settings SET value = '5' WHERE key = 'flow_dedup_seconds' AND value = '30'")
 
         # Remove historic false-positive alerts caused by Steam (155.133.x.x) or own outbound IP
         cur.execute("DELETE FROM alerts WHERE src_ip LIKE '155.133.%' OR src_ip LIKE '162.254.%'")
 
+        # Purge non-LAN/WAN IPs, broadcast, multicast, and link-local fe80 records from device_stats
+        cur.execute("""
+            DELETE FROM device_stats
+            WHERE ip NOT LIKE '192.168.%'
+              AND ip NOT LIKE '10.%'
+              AND ip NOT LIKE '172.16.%'
+              AND ip NOT LIKE '172.17.%'
+              AND ip NOT LIKE '172.18.%'
+              AND ip NOT LIKE '172.19.%'
+              AND ip NOT LIKE '172.20.%'
+              AND ip NOT LIKE '172.21.%'
+              AND ip NOT LIKE '172.22.%'
+              AND ip NOT LIKE '172.23.%'
+              AND ip NOT LIKE '172.24.%'
+              AND ip NOT LIKE '172.25.%'
+              AND ip NOT LIKE '172.26.%'
+              AND ip NOT LIKE '172.27.%'
+              AND ip NOT LIKE '172.28.%'
+              AND ip NOT LIKE '172.29.%'
+              AND ip NOT LIKE '172.30.%'
+              AND ip NOT LIKE '172.31.%'
+              AND ip NOT LIKE '100.%'
+        """)
+        cur.execute("DELETE FROM device_stats WHERE ip LIKE 'fe80:%' OR ip LIKE '%.255' OR ip IN ('255.255.255.255', '0.0.0.0', '::')")
+        cur.execute("UPDATE device_stats SET container_name = '' WHERE (ip LIKE '192.168.%' OR ip LIKE '100.%') AND container_name = 'adguard-home'")
+
         # Clean expired sessions on startup
         cur.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
 
+        # Initialize packet sequence from highest recorded DB ID
         cur.execute("SELECT COALESCE(MAX(id), 0) AS max_id FROM packets")
-        row = cur.fetchone()
-        _next_pkt_id = (int(row["max_id"]) if row else 0) + 1
+        row_id = cur.fetchone()
+        global _last_pkt_seq
+        if row_id:
+            _last_pkt_seq = int(row_id["max_id"])
 
         conn.commit()
         conn.close()
@@ -277,7 +325,7 @@ def buffer_device_traffic(
     proto: str,
     now: float,
 ) -> None:
-    if not ip or ip.startswith("127.") or ip == "::1":
+    if not is_lan_ip(ip):
         return
     with _device_buffer_lock:
         dev = _device_buffer.get(ip)
@@ -293,9 +341,9 @@ def buffer_device_traffic(
                 "last_seen": now,
             }
         else:
-            if mac and not dev["mac"]:
+            if mac and (not dev["mac"] or dev["mac"] == "L3/TUNNEL"):
                 dev["mac"] = mac
-            if container and not dev["container"]:
+            if container:
                 dev["container"] = container
             dev["b_sent"] += b_sent
             dev["b_recv"] += b_recv
@@ -306,136 +354,115 @@ def buffer_device_traffic(
             dev["last_seen"] = now
 
 
-def flush_all_buffers() -> None:
-    global _last_packet_flush, _last_device_flush
-    with _packet_buffer_lock:
-        if not _packet_buffer:
-            pkts_to_flush: List[Dict[str, Any]] = []
-        else:
-            pkts_to_flush = list(_packet_buffer)
-            _packet_buffer.clear()
-        _last_packet_flush = time.time()
-
+def flush_device_buffer() -> None:
+    global _last_device_flush
     with _device_buffer_lock:
         if not _device_buffer:
-            devs_to_flush: List[Tuple[str, Dict[str, Any]]] = []
-        else:
-            devs_to_flush = list(_device_buffer.items())
-            _device_buffer.clear()
+            return
+        to_flush = list(_device_buffer.items())
+        _device_buffer.clear()
         _last_device_flush = time.time()
-
-    if not pkts_to_flush and not devs_to_flush:
-        return
 
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
-        try:
-            if pkts_to_flush:
-                batch_rows = []
-                for p in pkts_to_flush:
-                    osi_obj = p.get("osi")
-                    osi_str = json.dumps(osi_obj, ensure_ascii=False) if isinstance(osi_obj, dict) else "{}"
-                    batch_rows.append(
-                        (
-                            p.get("id"),
-                            p.get("timestamp", time.time()),
-                            p.get("iface", "any"),
-                            p.get("src_mac", ""),
-                            p.get("dst_mac", ""),
-                            p.get("eth_type", "IPv4"),
-                            p.get("src_ip", ""),
-                            p.get("dst_ip", ""),
-                            p.get("ip_version", 4),
-                            p.get("ttl", 64),
-                            p.get("protocol", "TCP"),
-                            p.get("l7_proto", ""),
-                            p.get("src_port", 0),
-                            p.get("dst_port", 0),
-                            p.get("tcp_flags", ""),
-                            p.get("seq_num", 0),
-                            p.get("ack_num", 0),
-                            p.get("window_size", 0),
-                            p.get("length", 0),
-                            p.get("domain_sni", ""),
-                            p.get("info", ""),
-                            p.get("payload_hex", ""),
-                            p.get("payload_ascii", ""),
-                            osi_str,
-                            p.get("container_name", ""),
-                            p.get("process_name", ""),
-                        )
-                    )
-                cur.executemany(
-                    """
-                    INSERT OR REPLACE INTO packets (
-                        id, timestamp, iface, src_mac, dst_mac, eth_type,
-                        src_ip, dst_ip, ip_version, ttl, protocol, l7_proto,
-                        src_port, dst_port, tcp_flags, seq_num, ack_num, window_size,
-                        length, domain_sni, info, payload_hex, payload_ascii, osi_json,
-                        container_name, process_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    batch_rows,
-                )
-
-            if devs_to_flush:
-                for ip, dev in devs_to_flush:
-                    proto_str = ",".join(sorted(dev["protos"]))
-                    _upsert_device(
-                        cur,
-                        ip,
-                        dev["mac"],
-                        dev["container"],
-                        dev["b_sent"],
-                        dev["b_recv"],
-                        dev["p_sent"],
-                        dev["p_recv"],
-                        proto_str,
-                        dev["last_seen"],
-                    )
-
-            conn.commit()
-        except Exception:
-            pass
-        finally:
-            conn.close()
-
-
-def flush_device_buffer() -> None:
-    flush_all_buffers()
+        for ip, dev in to_flush:
+            proto_str = ",".join(sorted(dev["protos"]))
+            _upsert_device(
+                cur,
+                ip,
+                dev["mac"],
+                dev["container"],
+                dev["b_sent"],
+                dev["b_recv"],
+                dev["p_sent"],
+                dev["p_recv"],
+                proto_str,
+                dev["last_seen"],
+            )
+        conn.commit()
+        conn.close()
 
 
 def flush_packet_buffer() -> None:
-    flush_all_buffers()
+    global _last_packet_flush, _last_pkt_seq
+    with _packet_buffer_lock:
+        if not _packet_buffer:
+            return
+        batch = list(_packet_buffer)
+        _packet_buffer.clear()
+        _last_packet_flush = time.time()
+
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            INSERT OR REPLACE INTO packets (
+                id, timestamp, iface, src_mac, dst_mac, eth_type,
+                src_ip, dst_ip, ip_version, ttl, protocol, l7_proto,
+                src_port, dst_port, tcp_flags, seq_num, ack_num, window_size,
+                length, domain_sni, info, payload_hex, payload_ascii, osi_json,
+                container_name, process_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    p.get("id"),
+                    p.get("timestamp", time.time()),
+                    p.get("iface", "any"),
+                    p.get("src_mac", ""),
+                    p.get("dst_mac", ""),
+                    p.get("eth_type", "IPv4"),
+                    p.get("src_ip", ""),
+                    p.get("dst_ip", ""),
+                    p.get("ip_version", 4),
+                    p.get("ttl", 64),
+                    p.get("protocol", "TCP"),
+                    p.get("l7_proto", ""),
+                    p.get("src_port", 0),
+                    p.get("dst_port", 0),
+                    p.get("tcp_flags", ""),
+                    p.get("seq_num", 0),
+                    p.get("ack_num", 0),
+                    p.get("window_size", 0),
+                    p.get("length", 0),
+                    p.get("domain_sni", ""),
+                    p.get("info", ""),
+                    p.get("payload_hex", ""),
+                    p.get("payload_ascii", ""),
+                    json.dumps(p.get("osi", {}), ensure_ascii=False) if isinstance(p.get("osi"), (dict, list)) else str(p.get("osi") or "{}"),
+                    p.get("container_name", ""),
+                    p.get("process_name", ""),
+                )
+                for p in batch
+            ],
+        )
+
+        settings = get_settings()
+        max_pkts = int(settings.get("max_stored_packets", "5000") or 5000)
+        max_pkts = max(100, min(50000, max_pkts))
+        cur.execute(
+            "DELETE FROM packets WHERE id <= (SELECT MAX(id) - ? FROM packets)",
+            (max_pkts,),
+        )
+        conn.commit()
+        conn.close()
 
 
 def insert_packet(pkt: Dict[str, Any]) -> int:
-    global _next_pkt_id
-    now = pkt.get("timestamp", time.time())
-
+    global _last_pkt_seq
     with _packet_buffer_lock:
-        if not pkt.get("id"):
-            pkt["id"] = _next_pkt_id
-            _next_pkt_id += 1
-        pkt_id = int(pkt["id"])
+        _last_pkt_seq += 1
+        pkt_id = _last_pkt_seq
+        pkt["id"] = pkt_id
         _packet_buffer.append(pkt)
-        should_flush = len(_packet_buffer) >= BATCH_PACKET_LIMIT or (now - _last_packet_flush > FLUSH_INTERVAL_SECONDS)
-
-    length = int(pkt.get("length", 0))
-    proto = pkt.get("l7_proto") or pkt.get("protocol") or "OTHER"
-    src_ip = pkt.get("src_ip", "")
-    dst_ip = pkt.get("dst_ip", "")
-    container = pkt.get("container_name", "")
-
-    if src_ip:
-        buffer_device_traffic(src_ip, pkt.get("src_mac", ""), container, length, 0, 1, 0, proto, now)
-    if dst_ip:
-        buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), container, 0, length, 0, 1, proto, now)
+        should_flush = len(_packet_buffer) >= 5000
 
     if should_flush:
-        flush_all_buffers()
+        flush_packet_buffer()
 
+    record_device_traffic_only(pkt)
     return pkt_id
 
 
@@ -446,15 +473,15 @@ def record_device_traffic_only(pkt: Dict[str, Any]) -> None:
     proto = pkt.get("l7_proto") or pkt.get("protocol") or "OTHER"
     src_ip = pkt.get("src_ip", "")
     dst_ip = pkt.get("dst_ip", "")
-    container = pkt.get("container_name", "")
+    src_container = pkt.get("src_container", "")
+    dst_container = pkt.get("dst_container", "")
 
-    if src_ip:
-        buffer_device_traffic(src_ip, pkt.get("src_mac", ""), container, length, 0, 1, 0, proto, now)
-    if dst_ip:
-        buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), container, 0, length, 0, 1, proto, now)
-
-    if now - _last_packet_flush > FLUSH_INTERVAL_SECONDS:
-        flush_all_buffers()
+    if src_ip and is_lan_ip(src_ip):
+        buffer_device_traffic(src_ip, pkt.get("src_mac", ""), src_container, length, 0, 1, 0, proto, now)
+    if dst_ip and is_lan_ip(dst_ip):
+        buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), dst_container, 0, length, 0, 1, proto, now)
+    if now - _last_device_flush > 5.0 or len(_device_buffer) > 40:
+        flush_device_buffer()
 
 
 def _upsert_device(
@@ -469,7 +496,9 @@ def _upsert_device(
     proto: str,
     now: float,
 ) -> None:
-    cur.execute("SELECT protocols, container_name, mac FROM device_stats WHERE ip = ?", (ip,))
+    if not is_lan_ip(ip):
+        return
+    cur.execute("SELECT protocols, container_name, mac, hostname FROM device_stats WHERE ip = ?", (ip,))
     row = cur.fetchone()
     if row is None:
         cur.execute(
@@ -488,7 +517,7 @@ def _upsert_device(
             existing_protos.add(proto)
         new_protos = ",".join(sorted(existing_protos))
         new_container = container if container else (row["container_name"] or "")
-        new_mac = mac if mac else (row["mac"] or "")
+        new_mac = mac if (mac and mac != "L3/TUNNEL") else (row["mac"] or mac)
         cur.execute(
             """
             UPDATE device_stats
@@ -506,6 +535,41 @@ def _upsert_device(
         )
 
 
+def _packet_matches(
+    p: Dict[str, Any],
+    ip: Optional[str] = None,
+    port: Optional[int] = None,
+    protocol: Optional[str] = None,
+    search: Optional[str] = None,
+    container: Optional[str] = None,
+) -> bool:
+    if ip:
+        ip_l = ip.lower()
+        if ip_l not in (p.get("src_ip") or "").lower() and ip_l not in (p.get("dst_ip") or "").lower():
+            return False
+    if port:
+        if p.get("src_port") != port and p.get("dst_port") != port:
+            return False
+    if protocol:
+        proto_u = protocol.upper()
+        if (p.get("protocol") or "").upper() != proto_u and (p.get("l7_proto") or "").upper() != proto_u:
+            return False
+    if container:
+        if container.lower() not in (p.get("container_name") or "").lower():
+            return False
+    if search:
+        s_l = search.lower()
+        matched = (
+            s_l in (p.get("info") or "").lower()
+            or s_l in (p.get("domain_sni") or "").lower()
+            or s_l in (p.get("payload_ascii") or "").lower()
+            or s_l in (p.get("process_name") or "").lower()
+        )
+        if not matched:
+            return False
+    return True
+
+
 def query_packets(
     limit: int = 50,
     offset: int = 0,
@@ -515,7 +579,18 @@ def query_packets(
     search: Optional[str] = None,
     container: Optional[str] = None,
 ) -> Dict[str, Any]:
-    flush_all_buffers()
+    safe_limit = min(200, max(1, limit))
+    safe_offset = max(0, offset)
+
+    # 1. Match from RAM packet buffer (newest first)
+    with _packet_buffer_lock:
+        mem_packets = [
+            p for p in reversed(_packet_buffer)
+            if _packet_matches(p, ip, port, protocol, search, container)
+        ]
+    mem_count = len(mem_packets)
+
+    # 2. Count & query from database
     conn = get_conn()
     cur = conn.cursor()
     clauses = []
@@ -540,24 +615,43 @@ def query_packets(
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     cur.execute(f"SELECT COUNT(*) AS cnt FROM packets {where_sql}", params)
     cnt_row = cur.fetchone()
-    total_count = int(cnt_row["cnt"]) if cnt_row else 0
+    db_count = int(cnt_row["cnt"]) if cnt_row else 0
+    total_count = mem_count + db_count
 
-    safe_limit = min(200, max(1, limit))
-    safe_offset = max(0, offset)
-    sql = f"SELECT * FROM packets {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
-    cur.execute(sql, [*params, safe_limit, safe_offset])
-    rows = [dict(r) for r in cur.fetchall()]
-    for r in rows:
-        try:
-            r["osi"] = json.loads(r.get("osi_json") or "{}")
-        except Exception:
-            r["osi"] = {}
+    # 3. Assemble slice from memory and DB
+    result_packets: List[Dict[str, Any]] = []
+    if safe_offset < mem_count:
+        result_packets.extend(mem_packets[safe_offset : safe_offset + safe_limit])
+
+    needed_from_db = safe_limit - len(result_packets)
+    if needed_from_db > 0 and db_count > 0:
+        db_offset = max(0, safe_offset - mem_count)
+        sql = f"SELECT * FROM packets {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+        cur.execute(sql, [*params, needed_from_db, db_offset])
+        for r in cur.fetchall():
+            row_dict = dict(r)
+            try:
+                row_dict["osi"] = json.loads(row_dict.get("osi_json") or "{}")
+            except Exception:
+                row_dict["osi"] = {}
+            result_packets.append(row_dict)
+
     conn.close()
-    return {"packets": rows, "total": total_count, "limit": safe_limit, "offset": safe_offset}
+    return {"packets": result_packets, "total": total_count, "limit": safe_limit, "offset": safe_offset}
 
 
 def get_packet_by_id(pkt_id: int) -> Optional[Dict[str, Any]]:
-    flush_all_buffers()
+    with _packet_buffer_lock:
+        for p in reversed(_packet_buffer):
+            if p.get("id") == pkt_id:
+                res = dict(p)
+                if isinstance(res.get("osi"), str):
+                    try:
+                        res["osi"] = json.loads(res["osi"])
+                    except Exception:
+                        pass
+                return res
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM packets WHERE id = ?", (pkt_id,))
@@ -573,33 +667,94 @@ def get_packet_by_id(pkt_id: int) -> Optional[Dict[str, Any]]:
     return d
 
 
-def get_device_stats(limit: int = 100, search: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_device_stats(
+    limit: int = 100,
+    search: Optional[str] = None,
+    filter_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     flush_device_buffer()
+    now = time.time()
     conn = get_conn()
     cur = conn.cursor()
+
+    sql = """
+        SELECT *, (bytes_sent + bytes_recv) AS total_bytes
+        FROM device_stats
+        WHERE 1=1
+    """
+    params: List[Any] = []
+
     if search:
         s_val = f"%{search[:64]}%"
-        cur.execute(
-            """
-            SELECT *, (bytes_sent + bytes_recv) AS total_bytes
-            FROM device_stats
-            WHERE ip LIKE ? OR container_name LIKE ? OR protocols LIKE ?
-            ORDER BY total_bytes DESC LIMIT ?
-            """,
-            (s_val, s_val, s_val, limit),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT *, (bytes_sent + bytes_recv) AS total_bytes
-            FROM device_stats
-            ORDER BY total_bytes DESC LIMIT ?
-            """,
-            (limit,),
-        )
-    rows = [dict(r) for r in cur.fetchall()]
+        sql += " AND (ip LIKE ? OR hostname LIKE ? OR container_name LIKE ? OR protocols LIKE ?)"
+        params.extend([s_val, s_val, s_val, s_val])
+
+    if filter_type == "active":
+        sql += " AND last_seen > ?"
+        params.append(now - 900.0)
+    elif filter_type == "docker":
+        sql += " AND container_name != ''"
+    elif filter_type == "lan":
+        sql += " AND (ip LIKE '192.168.%' OR ip LIKE '10.%') AND container_name = ''"
+
+    sql += " ORDER BY last_seen DESC LIMIT ?"
+    params.append(min(500, max(1, limit)))
+
+    cur.execute(sql, tuple(params))
+    raw_rows = cur.fetchall()
     conn.close()
-    return rows
+
+    out = []
+    for r in raw_rows:
+        d = dict(r)
+        last_s = float(d.get("last_seen") or 0.0)
+        is_online = (now - last_s) < 900.0
+        mac = d.get("mac") or ""
+        container = d.get("container_name") or ""
+        ip = d.get("ip") or ""
+
+        # Vendor or Device Type Identification
+        vendor = identify_mac_vendor(mac)
+        if container:
+            device_type = "Docker Container"
+        elif ip.startswith("100."):
+            device_type = "Tailscale / VPN"
+        elif ip == "192.168.1.1":
+            device_type = "Ağ Ağ Geçidi (Router)"
+        elif ip == "192.168.1.150":
+            device_type = "Debian Ana Sunucu"
+        else:
+            device_type = "LAN Cihazı"
+
+        d["is_online"] = is_online
+        d["status_text"] = "Aktif" if is_online else "Çevrimdışı"
+        d["vendor"] = vendor
+        d["device_type"] = device_type
+        out.append(d)
+
+    return out
+
+
+def update_device_name_db(ip: str, custom_name: str) -> bool:
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE device_stats SET hostname = ? WHERE ip = ?", (custom_name.strip()[:64], ip))
+        changed = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return changed
+
+
+def delete_device_db(ip: str) -> bool:
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM device_stats WHERE ip = ?", (ip,))
+        changed = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return changed
 
 
 def insert_alert(
@@ -648,6 +803,8 @@ def clear_alerts_db() -> None:
 
 
 def clear_packets_db() -> None:
+    with _packet_buffer_lock:
+        _packet_buffer.clear()
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
@@ -659,15 +816,16 @@ def clear_packets_db() -> None:
 
 def run_db_maintenance() -> Dict[str, Any]:
     """Prune old packets by count & age, cap device_stats, and checkpoint WAL so disk usage stays bounded."""
-    flush_all_buffers()
+    flush_packet_buffer()
+    flush_device_buffer()
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("SELECT key, value FROM settings WHERE key IN ('max_stored_packets', 'retention_hours')")
         cfg = {r["key"]: r["value"] for r in cur.fetchall()}
-        max_pkts = int(cfg.get("max_stored_packets", "50000") or 50000)
-        max_pkts = max(100, min(200000, max_pkts))
-        ret_hours = float(cfg.get("retention_hours", "72") or 72.0)
+        max_pkts = int(cfg.get("max_stored_packets", "5000") or 5000)
+        max_pkts = max(100, min(10000, max_pkts))
+        ret_hours = float(cfg.get("retention_hours", "24") or 24.0)
         cutoff = time.time() - (ret_hours * 3600.0)
 
         cur.execute("DELETE FROM packets WHERE timestamp < ?", (cutoff,))
@@ -676,12 +834,13 @@ def run_db_maintenance() -> Dict[str, Any]:
             (max_pkts,),
         )
         cur.execute(
-            "DELETE FROM device_stats WHERE ip NOT IN (SELECT ip FROM device_stats ORDER BY last_seen DESC LIMIT 2000)"
+            "DELETE FROM device_stats WHERE ip NOT IN (SELECT ip FROM device_stats ORDER BY last_seen DESC LIMIT 300)"
         )
         cur.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         conn.commit()
         try:
-            cur.execute("PRAGMA wal_checkpoint(PASSIVE);")
+            cur.execute("PRAGMA incremental_vacuum(200);")
+            cur.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         except Exception:
             pass
         conn.close()
@@ -689,16 +848,23 @@ def run_db_maintenance() -> Dict[str, Any]:
 
 
 def get_storage_stats() -> Dict[str, Any]:
-    flush_all_buffers()
+    flush_device_buffer()
+    now = time.time()
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) AS p_cnt FROM packets")
     p_cnt = int(cur.fetchone()["p_cnt"])
-    cur.execute("SELECT COUNT(*) AS d_cnt FROM device_stats")
-    d_cnt = int(cur.fetchone()["d_cnt"])
+    cur.execute("SELECT COUNT(*) AS active_cnt FROM device_stats WHERE last_seen > ?", (now - 900.0,))
+    active_d_cnt = int(cur.fetchone()["active_cnt"] or 0)
+    cur.execute("SELECT COUNT(*) AS total_cnt FROM device_stats")
+    total_d_cnt = int(cur.fetchone()["total_cnt"] or 0)
     cur.execute("SELECT COUNT(*) AS a_cnt FROM alerts")
     a_cnt = int(cur.fetchone()["a_cnt"])
     conn.close()
+
+    with _packet_buffer_lock:
+        ram_pkts = len(_packet_buffer)
+    total_pkts = p_cnt + ram_pkts
 
     total_bytes = 0
     for suffix in ("", "-wal", "-shm"):
@@ -711,22 +877,37 @@ def get_storage_stats() -> Dict[str, Any]:
     return {
         "db_size_bytes": total_bytes,
         "db_size_mb": round(total_bytes / (1024 * 1024), 2),
-        "packets_count": p_cnt,
-        "devices_count": d_cnt,
+        "packets_count": total_pkts,
+        "ram_packets_count": ram_pkts,
+        "db_packets_count": p_cnt,
+        "devices_count": active_d_cnt,
+        "active_devices_count": active_d_cnt,
+        "total_devices_count": total_d_cnt,
         "alerts_count": a_cnt,
     }
 
 
+_settings_cache: Optional[Dict[str, str]] = None
+_settings_lock = threading.Lock()
+
+
 def get_settings() -> Dict[str, str]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT key, value FROM settings")
-    res = {r["key"]: r["value"] for r in cur.fetchall()}
-    conn.close()
-    return res
+    global _settings_cache
+    if _settings_cache is not None:
+        return _settings_cache
+    with _settings_lock:
+        if _settings_cache is not None:
+            return _settings_cache
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM settings")
+        _settings_cache = {r["key"]: r["value"] for r in cur.fetchall()}
+        conn.close()
+        return _settings_cache
 
 
 def update_settings(new_settings: Dict[str, Any]) -> Dict[str, str]:
+    global _settings_cache
     allowed_keys = {
         "webhook_url",
         "telegram_bot_token",
@@ -754,4 +935,6 @@ def update_settings(new_settings: Dict[str, Any]) -> Dict[str, str]:
                 cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, str(v)))
         conn.commit()
         conn.close()
+    with _settings_lock:
+        _settings_cache = None
     return get_settings()

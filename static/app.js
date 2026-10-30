@@ -15,11 +15,15 @@ function getCookie(name) {
   return "";
 }
 
+function getCsrfToken() {
+  return csrfToken || getCookie("ynetmon_csrf");
+}
+
 async function apiFetch(url, options = {}) {
   const opts = { ...options };
   opts.headers = { ...(options.headers || {}) };
   if (opts.method && ["POST", "PUT", "DELETE", "PATCH"].includes(opts.method.toUpperCase())) {
-    opts.headers["X-CSRF-Token"] = csrfToken || getCookie("ynetmon_csrf");
+    opts.headers["X-CSRF-Token"] = getCsrfToken();
   }
   const res = await fetch(url, opts);
   if (res.status === 401) {
@@ -78,7 +82,8 @@ function updateStorageBadge(st) {
   if (!st) return;
   const el = document.getElementById("storageBadge");
   if (el) {
-    el.textContent = `DB: ${st.db_size_mb ?? 0} MB (${st.packets_count ?? 0} pkt)`;
+    const ramInfo = st.ram_packets_count ? ` + ${st.ram_packets_count} RAM` : "";
+    el.textContent = `DB: ${st.db_size_mb ?? 0} MB (${st.packets_count ?? 0} pkt${ramInfo})`;
   }
 }
 
@@ -147,6 +152,9 @@ document.getElementById("btnLabTraffic").addEventListener("click", async () => {
 });
 
 document.getElementById("btnClearPackets").addEventListener("click", async () => {
+  if (!confirm("Tüm kayıtlı paket geçmişini silmek istediğinize emin misiniz? Bu işlem geri alınamaz.")) {
+    return;
+  }
   const res = await apiFetch("/api/packets/clear", { method: "POST" });
   const data = await res.json();
   updateStorageBadge(data.storage);
@@ -479,24 +487,45 @@ document.getElementById("btnRefreshConns").addEventListener("click", loadConnect
 
 // Devices Tab (CSP-safe event listeners)
 async function loadDevices() {
+  const filterEl = document.getElementById("deviceFilter");
+  const filterVal = filterEl ? filterEl.value : "active";
   const q = document.getElementById("deviceSearch").value.trim();
-  const res = await apiFetch(`/api/devices${q ? `?search=${encodeURIComponent(q)}` : ""}`);
+  const params = new URLSearchParams();
+  if (q) params.set("search", q);
+  if (filterVal) params.set("filter", filterVal);
+
+  const res = await apiFetch(`/api/devices?${params.toString()}`);
   const data = await res.json();
+
+  const statsBadge = document.getElementById("deviceStatsBadge");
+  if (statsBadge) {
+    statsBadge.textContent = `Aktif: ${data.active_count || 0} / Toplam: ${data.count || 0}`;
+  }
+
   const tbody = document.getElementById("deviceTableBody");
   tbody.innerHTML = (data.devices || [])
     .map(
       (d) => `
       <tr>
-        <td><strong>${escapeHtml(d.ip)}</strong></td>
-        <td>${escapeHtml(d.mac || "-")}</td>
-        <td>${escapeHtml(d.container_name || "-")}</td>
+        <td>
+          <strong>${escapeHtml(d.hostname || d.container_name || (d.ip === "192.168.1.150" ? "Debian Ana Sunucu" : (d.ip === "192.168.1.1" ? "Gateway Router" : "İsimsiz Cihaz")))}</strong>
+          <button class="btn btn-outline btn-sm btn-edit-name" data-ip="${escapeHtml(d.ip)}" data-name="${escapeHtml(d.hostname || "")}" title="İsmi Düzenle" style="padding: 2px 6px; font-size: 11px; margin-left: 6px;">✏️</button>
+        </td>
+        <td><code>${escapeHtml(d.ip)}</code></td>
+        <td>
+          <div>${escapeHtml(d.vendor || "-")}</div>
+          <small class="muted" style="font-family: monospace; font-size: 11px;">${escapeHtml(d.mac || "-")}</small>
+        </td>
+        <td><span class="badge ${d.container_name ? "badge-warn" : "badge-neutral"}">${escapeHtml(d.container_name || d.device_type || "LAN")}</span></td>
+        <td><span class="badge ${d.is_online ? "badge-ok" : "badge-neutral"}">${d.is_online ? "🟢 Aktif" : "⚪ Çevrimdışı"}</span></td>
         <td class="tx-color">${formatBytes(d.bytes_sent)}</td>
         <td class="rx-color">${formatBytes(d.bytes_recv)}</td>
         <td><strong>${formatBytes(d.total_bytes)}</strong></td>
-        <td>${d.packets_sent} / ${d.packets_recv}</td>
-        <td>${escapeHtml(d.protocols)}</td>
         <td>${formatTime(d.last_seen)}</td>
-        <td><button class="btn btn-outline btn-sm btn-filter-ip" data-ip="${escapeHtml(d.ip)}">Paketleri Gör</button></td>
+        <td>
+          <button class="btn btn-outline btn-sm btn-filter-ip" data-ip="${escapeHtml(d.ip)}">Trafiği Gör</button>
+          ${!d.is_online ? `<button class="btn btn-outline btn-sm btn-del-dev" data-ip="${escapeHtml(d.ip)}" title="Listeden Kaldır" style="color: #f87171; border-color: rgba(248,113,113,0.3); margin-left: 4px;">Sil</button>` : ""}
+        </td>
       </tr>
     `
     )
@@ -510,8 +539,64 @@ async function loadDevices() {
       loadPackets();
     });
   });
+
+  tbody.querySelectorAll(".btn-edit-name").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const ip = btn.dataset.ip;
+      const curName = btn.dataset.name || "";
+      const newName = prompt(`${ip} cihazı için bir isim / etiket girin:`, curName);
+      if (newName === null) return;
+      try {
+        const csrf = getCsrfToken();
+        const r = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/name`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrf,
+          },
+          body: JSON.stringify({ name: newName.trim() }),
+        });
+        if (r.ok) {
+          loadDevices();
+        } else {
+          const err = await r.json();
+          alert(err.detail || "İsim güncellenemedi.");
+        }
+      } catch (e) {
+        alert("Bağlantı hatası: " + e);
+      }
+    });
+  });
+
+  tbody.querySelectorAll(".btn-del-dev").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const ip = btn.dataset.ip;
+      if (!confirm(`${ip} cihazını veri tabanından silmek istediğinize emin misiniz?`)) return;
+      try {
+        const csrf = getCsrfToken();
+        const r = await apiFetch(`/api/devices/${encodeURIComponent(ip)}`, {
+          method: "DELETE",
+          headers: {
+            "X-CSRF-Token": csrf,
+          },
+        });
+        if (r.ok) {
+          loadDevices();
+        } else {
+          const err = await r.json();
+          alert(err.detail || "Cihaz silinemedi.");
+        }
+      } catch (e) {
+        alert("Bağlantı hatası: " + e);
+      }
+    });
+  });
 }
 document.getElementById("btnSearchDevices").addEventListener("click", loadDevices);
+const filterSelect = document.getElementById("deviceFilter");
+if (filterSelect) {
+  filterSelect.addEventListener("change", loadDevices);
+}
 
 // Docker Tab (CSP-safe event listeners)
 async function loadDocker(refresh = false) {
@@ -696,6 +781,9 @@ async function loadAlerts() {
 }
 document.getElementById("btnRefreshAlerts").addEventListener("click", loadAlerts);
 document.getElementById("btnClearAlerts").addEventListener("click", async () => {
+  if (!confirm("Tüm alarmları temizlemek istediğinize emin misiniz?")) {
+    return;
+  }
   await apiFetch("/api/alerts/clear", { method: "POST" });
   loadAlerts();
 });

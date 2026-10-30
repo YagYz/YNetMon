@@ -177,11 +177,17 @@
     <section id="tab-devices" class="tab-panel">
       <div class="panel-header">
         <div>
-          <h2>Cihaz / IP Bazlı Toplam Veri Kullanımı</h2>
-          <p class="muted">SQLite veritabanında biriken IP bazlı gönderilen/alınan bayt, paket sayısı ve kullanılan protokoller.</p>
+          <h2>Yerel Ağ Cihazları ve Veri Kullanımı <span id="deviceStatsBadge" class="badge badge-ok">Aktif: - / Toplam: -</span></h2>
+          <p class="muted">Yerel ağdaki (LAN, Docker ve Tailscale) aktif cihazlar, donanım üreticileri, IP/MAC eşleşmeleri ve anlık veri kullanımı.</p>
         </div>
         <div class="inline-controls">
-          <input type="text" id="deviceSearch" placeholder="IP, Container veya Protokol ara..." />
+          <select id="deviceFilter" style="width: auto; min-width: 170px;">
+            <option value="active" selected>Yalnızca Aktif Cihazlar</option>
+            <option value="">Tüm Cihazlar (Aktif + Çevrimdışı)</option>
+            <option value="lan">Fiziksel LAN Cihazları</option>
+            <option value="docker">Docker Container'ları</option>
+          </select>
+          <input type="text" id="deviceSearch" placeholder="Cihaz Adı, IP veya Donanım ara..." />
           <button id="btnSearchDevices" class="btn btn-primary">Ara</button>
         </div>
       </div>
@@ -189,16 +195,16 @@
         <table class="data-table">
           <thead>
             <tr>
+              <th>Cihaz / İsim</th>
               <th>IP Adresi</th>
-              <th>MAC Adresi</th>
-              <th>Container / Etiket</th>
+              <th>Donanım / Üretici</th>
+              <th>Tür / Container</th>
+              <th>Durum</th>
               <th>Gönderilen (TX)</th>
               <th>Alınan (RX)</th>
               <th>Toplam Veri</th>
-              <th>Paket (TX / RX)</th>
-              <th>Protokoller</th>
               <th>Son Görülme</th>
-              <th>İşlem</th>
+              <th>İşlemler</th>
             </tr>
           </thead>
           <tbody id="deviceTableBody"></tbody>
