@@ -13,6 +13,10 @@ _write_lock = threading.Lock()
 _device_buffer_lock = threading.Lock()
 _device_buffer: Dict[str, Dict[str, Any]] = {}
 _last_device_flush: float = time.time()
+_packet_buffer_lock = threading.Lock()
+_packet_buffer: List[Dict[str, Any]] = []
+_last_packet_flush: float = time.time()
+_last_pkt_seq: int = 0
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
@@ -372,12 +376,19 @@ def flush_device_buffer() -> None:
         conn.close()
 
 
-def insert_packet(pkt: Dict[str, Any]) -> int:
-    now = pkt.get("timestamp", time.time())
+def flush_packet_buffer() -> None:
+    global _last_packet_flush, _last_pkt_seq
+    with _packet_buffer_lock:
+        if not _packet_buffer:
+            return
+        batch = list(_packet_buffer)
+        _packet_buffer.clear()
+        _last_packet_flush = time.time()
+
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute(
+        cur.executemany(
             """
             INSERT INTO packets (
                 timestamp, iface, src_mac, dst_mac, eth_type,
@@ -387,48 +398,64 @@ def insert_packet(pkt: Dict[str, Any]) -> int:
                 container_name, process_name
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                now,
-                pkt.get("iface", "any"),
-                pkt.get("src_mac", ""),
-                pkt.get("dst_mac", ""),
-                pkt.get("eth_type", "IPv4"),
-                pkt.get("src_ip", ""),
-                pkt.get("dst_ip", ""),
-                pkt.get("ip_version", 4),
-                pkt.get("ttl", 64),
-                pkt.get("protocol", "TCP"),
-                pkt.get("l7_proto", ""),
-                pkt.get("src_port", 0),
-                pkt.get("dst_port", 0),
-                pkt.get("tcp_flags", ""),
-                pkt.get("seq_num", 0),
-                pkt.get("ack_num", 0),
-                pkt.get("window_size", 0),
-                pkt.get("length", 0),
-                pkt.get("domain_sni", ""),
-                pkt.get("info", ""),
-                pkt.get("payload_hex", ""),
-                pkt.get("payload_ascii", ""),
-                json.dumps(pkt.get("osi", {}), ensure_ascii=False),
-                pkt.get("container_name", ""),
-                pkt.get("process_name", ""),
-            ),
+            [
+                (
+                    p.get("timestamp", time.time()),
+                    p.get("iface", "any"),
+                    p.get("src_mac", ""),
+                    p.get("dst_mac", ""),
+                    p.get("eth_type", "IPv4"),
+                    p.get("src_ip", ""),
+                    p.get("dst_ip", ""),
+                    p.get("ip_version", 4),
+                    p.get("ttl", 64),
+                    p.get("protocol", "TCP"),
+                    p.get("l7_proto", ""),
+                    p.get("src_port", 0),
+                    p.get("dst_port", 0),
+                    p.get("tcp_flags", ""),
+                    p.get("seq_num", 0),
+                    p.get("ack_num", 0),
+                    p.get("window_size", 0),
+                    p.get("length", 0),
+                    p.get("domain_sni", ""),
+                    p.get("info", ""),
+                    p.get("payload_hex", ""),
+                    p.get("payload_ascii", ""),
+                    json.dumps(p.get("osi", {}), ensure_ascii=False) if isinstance(p.get("osi"), (dict, list)) else str(p.get("osi") or "{}"),
+                    p.get("container_name", ""),
+                    p.get("process_name", ""),
+                )
+                for p in batch
+            ],
         )
-        pkt_id = cur.lastrowid or 0
+        last_id = cur.lastrowid or _last_pkt_seq
+        _last_pkt_seq = max(_last_pkt_seq, last_id)
 
-        if pkt_id % 200 == 0:
-            cur.execute("SELECT value FROM settings WHERE key = 'max_stored_packets'")
-            row_max = cur.fetchone()
-            max_pkts = int(row_max["value"]) if row_max and str(row_max["value"]).isdigit() else 5000
-            max_pkts = max(100, min(10000, max_pkts))
-            cur.execute(
-                "DELETE FROM packets WHERE id <= (SELECT MAX(id) - ? FROM packets)",
-                (max_pkts,),
-            )
-
+        # Periodic prune of packets table to prevent disk bloat
+        cur.execute("SELECT value FROM settings WHERE key = 'max_stored_packets'")
+        row_max = cur.fetchone()
+        max_pkts = int(row_max["value"]) if row_max and str(row_max["value"]).isdigit() else 5000
+        max_pkts = max(100, min(10000, max_pkts))
+        cur.execute(
+            "DELETE FROM packets WHERE id <= (SELECT MAX(id) - ? FROM packets)",
+            (max_pkts,),
+        )
         conn.commit()
         conn.close()
+
+
+def insert_packet(pkt: Dict[str, Any]) -> int:
+    global _last_pkt_seq
+    now = pkt.get("timestamp", time.time())
+    with _packet_buffer_lock:
+        _last_pkt_seq += 1
+        pkt_id = _last_pkt_seq
+        _packet_buffer.append(pkt)
+        should_flush = len(_packet_buffer) >= 30 or (now - _last_packet_flush > 2.0)
+
+    if should_flush:
+        flush_packet_buffer()
 
     length = int(pkt.get("length", 0))
     proto = pkt.get("l7_proto") or pkt.get("protocol") or "OTHER"
@@ -526,6 +553,7 @@ def query_packets(
     search: Optional[str] = None,
     container: Optional[str] = None,
 ) -> Dict[str, Any]:
+    flush_packet_buffer()
     conn = get_conn()
     cur = conn.cursor()
     clauses = []
@@ -718,6 +746,8 @@ def clear_alerts_db() -> None:
 
 
 def clear_packets_db() -> None:
+    with _packet_buffer_lock:
+        _packet_buffer.clear()
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
@@ -729,6 +759,7 @@ def clear_packets_db() -> None:
 
 def run_db_maintenance() -> Dict[str, Any]:
     """Prune old packets by count & age, cap device_stats, and checkpoint WAL so disk usage stays bounded."""
+    flush_packet_buffer()
     flush_device_buffer()
     with _write_lock:
         conn = get_conn()
@@ -760,6 +791,7 @@ def run_db_maintenance() -> Dict[str, Any]:
 
 
 def get_storage_stats() -> Dict[str, Any]:
+    flush_packet_buffer()
     flush_device_buffer()
     now = time.time()
     conn = get_conn()

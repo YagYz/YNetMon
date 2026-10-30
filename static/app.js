@@ -147,6 +147,9 @@ document.getElementById("btnLabTraffic").addEventListener("click", async () => {
 });
 
 document.getElementById("btnClearPackets").addEventListener("click", async () => {
+  if (!confirm("Tüm kayıtlı paket geçmişini silmek istediğinize emin misiniz? Bu işlem geri alınamaz.")) {
+    return;
+  }
   const res = await apiFetch("/api/packets/clear", { method: "POST" });
   const data = await res.json();
   updateStorageBadge(data.storage);
@@ -773,6 +776,9 @@ async function loadAlerts() {
 }
 document.getElementById("btnRefreshAlerts").addEventListener("click", loadAlerts);
 document.getElementById("btnClearAlerts").addEventListener("click", async () => {
+  if (!confirm("Tüm alarmları temizlemek istediğinize emin misiniz?")) {
+    return;
+  }
   await apiFetch("/api/alerts/clear", { method: "POST" });
   loadAlerts();
 });
