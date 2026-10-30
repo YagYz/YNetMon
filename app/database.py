@@ -40,10 +40,8 @@ def is_lan_ip(ip_str: str) -> bool:
 
 
 def get_conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA temp_store=MEMORY;")
@@ -51,9 +49,11 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA auto_vacuum=INCREMENTAL;")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -432,15 +432,15 @@ def flush_packet_buffer() -> None:
         last_id = cur.lastrowid or _last_pkt_seq
         _last_pkt_seq = max(_last_pkt_seq, last_id)
 
-        # Periodic prune of packets table to prevent disk bloat
-        cur.execute("SELECT value FROM settings WHERE key = 'max_stored_packets'")
-        row_max = cur.fetchone()
-        max_pkts = int(row_max["value"]) if row_max and str(row_max["value"]).isdigit() else 5000
-        max_pkts = max(100, min(10000, max_pkts))
-        cur.execute(
-            "DELETE FROM packets WHERE id <= (SELECT MAX(id) - ? FROM packets)",
-            (max_pkts,),
-        )
+        # Periodic prune of packets table to prevent disk bloat (every ~500 packets)
+        if _last_pkt_seq % 500 < len(batch):
+            settings = get_settings()
+            max_pkts = int(settings.get("max_stored_packets", "5000") or 5000)
+            max_pkts = max(100, min(10000, max_pkts))
+            cur.execute(
+                "DELETE FROM packets WHERE id <= (SELECT MAX(id) - ? FROM packets)",
+                (max_pkts,),
+            )
         conn.commit()
         conn.close()
 
@@ -825,16 +825,27 @@ def get_storage_stats() -> Dict[str, Any]:
     }
 
 
+_settings_cache: Optional[Dict[str, str]] = None
+_settings_lock = threading.Lock()
+
+
 def get_settings() -> Dict[str, str]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT key, value FROM settings")
-    res = {r["key"]: r["value"] for r in cur.fetchall()}
-    conn.close()
-    return res
+    global _settings_cache
+    if _settings_cache is not None:
+        return _settings_cache
+    with _settings_lock:
+        if _settings_cache is not None:
+            return _settings_cache
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM settings")
+        _settings_cache = {r["key"]: r["value"] for r in cur.fetchall()}
+        conn.close()
+        return _settings_cache
 
 
 def update_settings(new_settings: Dict[str, Any]) -> Dict[str, str]:
+    global _settings_cache
     allowed_keys = {
         "webhook_url",
         "telegram_bot_token",
@@ -862,4 +873,6 @@ def update_settings(new_settings: Dict[str, Any]) -> Dict[str, str]:
                 cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, str(v)))
         conn.commit()
         conn.close()
+    with _settings_lock:
+        _settings_cache = None
     return get_settings()
