@@ -43,6 +43,13 @@ class NetworkMonitor:
         self.listening_ports: Set[int] = set()
         self.outbound_remote_ips: Set[str] = set()
 
+        try:
+            from psutil import _pslinux
+            if hasattr(_pslinux, "_net_connections"):
+                _pslinux._net_connections._procfs_path = "/proc"
+        except Exception:
+            pass
+
         self._seen_flows: Dict[Tuple[str, int, str, int, str], float] = {}
         self._port_scan_tracker: Dict[str, Set[int]] = defaultdict(set)
         self._port_scan_reset: float = time.time()
