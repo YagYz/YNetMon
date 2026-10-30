@@ -15,11 +15,15 @@ function getCookie(name) {
   return "";
 }
 
+function getCsrfToken() {
+  return csrfToken || getCookie("ynetmon_csrf");
+}
+
 async function apiFetch(url, options = {}) {
   const opts = { ...options };
   opts.headers = { ...(options.headers || {}) };
   if (opts.method && ["POST", "PUT", "DELETE", "PATCH"].includes(opts.method.toUpperCase())) {
-    opts.headers["X-CSRF-Token"] = csrfToken || getCookie("ynetmon_csrf");
+    opts.headers["X-CSRF-Token"] = getCsrfToken();
   }
   const res = await fetch(url, opts);
   if (res.status === 401) {
@@ -78,7 +82,8 @@ function updateStorageBadge(st) {
   if (!st) return;
   const el = document.getElementById("storageBadge");
   if (el) {
-    el.textContent = `DB: ${st.db_size_mb ?? 0} MB (${st.packets_count ?? 0} pkt)`;
+    const ramInfo = st.ram_packets_count ? ` + ${st.ram_packets_count} RAM` : "";
+    el.textContent = `DB: ${st.db_size_mb ?? 0} MB (${st.packets_count ?? 0} pkt${ramInfo})`;
   }
 }
 

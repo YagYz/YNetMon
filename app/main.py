@@ -32,6 +32,8 @@ from .database import (
     clear_alerts_db,
     clear_packets_db,
     delete_device_db,
+    flush_device_buffer,
+    flush_packet_buffer,
     get_alerts,
     get_device_stats,
     get_packet_by_id,
@@ -125,6 +127,8 @@ async def lifespan(app: FastAPI):
     bg_task = asyncio.create_task(_background_sampler())
     yield
     bg_task.cancel()
+    await asyncio.to_thread(flush_packet_buffer)
+    await asyncio.to_thread(flush_device_buffer)
 
 
 async def _background_sampler() -> None:
