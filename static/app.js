@@ -272,6 +272,9 @@ function renderPacketTable(packets) {
       tbody.querySelectorAll("tr").forEach((r) => r.classList.remove("selected"));
       row.classList.add("selected");
       showPacketDetail(id);
+      if (window.innerWidth <= 1080) {
+        document.getElementById("packetDetailPane").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     });
   });
 
@@ -323,6 +326,11 @@ async function showPacketDetail(pktId) {
 
   const pane = document.getElementById("packetDetailPane");
   pane.innerHTML = `
+    <div class="detail-mobile-back">
+      <button type="button" class="btn btn-outline btn-sm" id="btnBackToPackets" style="width:100%;margin-bottom:8px;">
+        ▲ Paket Listesine Dön
+      </button>
+    </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px;">
       <h3>Paket #${pkt.id} OSI 7 Katman Analizi</h3>
       <span class="proto-pill proto-${escapeHtml(pkt.l7_proto || pkt.protocol)}">${escapeHtml(pkt.l7_proto || pkt.protocol)} (${pkt.length} Bayt)</span>
@@ -413,6 +421,25 @@ async function showPacketDetail(pktId) {
     <h4 style="margin:12px 0 6px;font-size:13px;">Paket Payload (Hex &amp; ASCII İnceleyici)</h4>
     <div class="hex-viewer">${escapeHtml(pkt.payload_hex || "Payload verisi yok (Sadece başlık paketi).")}</div>
   `;
+
+  const backBtn = document.getElementById("btnBackToPackets");
+  if (backBtn) {
+    backBtn.addEventListener("click", () => {
+      const listPane = document.getElementById("packetListPane");
+      if (listPane) listPane.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+}
+
+const btnToggleFilters = document.getElementById("btnToggleFilters");
+if (btnToggleFilters) {
+  btnToggleFilters.addEventListener("click", () => {
+    const fbar = document.getElementById("packetFilterBar");
+    if (fbar) {
+      fbar.classList.toggle("open");
+      btnToggleFilters.textContent = fbar.classList.contains("open") ? "▲ Filtreleri Gizle" : "🔍 Filtreler";
+    }
+  });
 }
 
 document.getElementById("btnApplyFilter").addEventListener("click", () => {
@@ -429,10 +456,14 @@ document.getElementById("btnClearFilter").addEventListener("click", () => {
   loadPackets();
 });
 
-// Bandwidth Chart
+// Bandwidth Chart with Auto-Resize
 function drawBandwidthChart() {
   const canvas = document.getElementById("bwChart");
   if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width > 0 && Math.abs(canvas.width - Math.floor(rect.width)) > 2) {
+    canvas.width = Math.floor(rect.width);
+  }
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
@@ -841,4 +872,5 @@ function connectWebSocket() {
   await initStatus();
   await loadPackets();
   connectWebSocket();
+  window.addEventListener("resize", drawBandwidthChart);
 })();

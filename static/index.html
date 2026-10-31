@@ -8,33 +8,41 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="logo-dot"></span>
-      <div>
-        <h1>YNetMon</h1>
-        <p class="subtitle">Homelab Ağ Trafiği İzleyici &amp; Eğitici OSI Paket Analizörü</p>
+    <div class="topbar-main">
+      <div class="brand">
+        <span class="logo-dot"></span>
+        <div>
+          <h1>YNetMon</h1>
+          <p class="subtitle">Homelab Ağ Trafiği İzleyici &amp; Eğitici OSI Paket Analizörü</p>
+        </div>
+      </div>
+      <div class="user-actions">
+        <span id="userBadge" class="badge badge-ok">👤 -</span>
+        <button id="btnLogout" class="btn btn-outline btn-sm" title="Güvenli Çıkış">Çıkış</button>
       </div>
     </div>
 
-    <div class="top-controls">
-      <div id="captureBadge" class="badge badge-ok" title="Aktif trafik analiz modu">
-        Analiz Motoru Aktif
+    <div class="topbar-sub">
+      <div class="badge-group">
+        <div id="captureBadge" class="badge badge-ok" title="Aktif trafik analiz modu">
+          Analiz Motoru Aktif
+        </div>
+        <div id="storageBadge" class="badge badge-neutral" title="SQLite Veritabanı Boyutu ve Kayıt Sayısı">
+          DB: 0.0 MB
+        </div>
       </div>
-      <div id="storageBadge" class="badge badge-neutral" title="SQLite Veritabanı Boyutu ve Kayıt Sayısı">
-        DB: 0.0 MB
+      <div class="actions-group">
+        <label class="iface-picker">
+          <span>Arayüz:</span>
+          <select id="ifaceSelect"></select>
+        </label>
+        <button id="btnLabTraffic" class="btn btn-accent" title="DNS, TCP 3'lü El Sıkışma, TLS SNI ve HTTP örnek paketleri üret">
+          + Lab Paketleri
+        </button>
+        <a href="/api/export/pcap?limit=300" class="btn btn-outline" download>
+          .PCAP
+        </a>
       </div>
-      <label class="iface-picker">
-        <span>Arayüz:</span>
-        <select id="ifaceSelect"></select>
-      </label>
-      <button id="btnLabTraffic" class="btn btn-accent" title="DNS, TCP 3'lü El Sıkışma, TLS SNI ve HTTP örnek paketleri üret">
-        + Örnek Paketler (Lab)
-      </button>
-      <a href="/api/export/pcap?limit=300" class="btn btn-outline" download>
-        .PCAP İndir
-      </a>
-      <span id="userBadge" class="badge badge-ok">👤 -</span>
-      <button id="btnLogout" class="btn btn-outline" title="Güvenli Çıkış">Çıkış Yap</button>
     </div>
   </header>
 
@@ -69,43 +77,52 @@
   </section>
 
   <nav class="tabs">
-    <button class="tab active" data-tab="tab-packets">1. Paket &amp; OSI İnceleyici</button>
-    <button class="tab" data-tab="tab-connections">2. Aktif Bağlantılar (Soketler)</button>
-    <button class="tab" data-tab="tab-devices">3. Cihaz / IP Veri Kullanımı</button>
-    <button class="tab" data-tab="tab-docker">4. Docker Container Trafiği</button>
-    <button class="tab" data-tab="tab-alerts">5. Alarmlar, Saklama &amp; Entegrasyon</button>
+    <button class="tab active" data-tab="tab-packets">1. Paket &amp; OSI</button>
+    <button class="tab" data-tab="tab-connections">2. Aktif Soketler</button>
+    <button class="tab" data-tab="tab-devices">3. Cihaz / IP Trafiği</button>
+    <button class="tab" data-tab="tab-docker">4. Docker Trafiği</button>
+    <button class="tab" data-tab="tab-alerts">5. Alarmlar &amp; Ayarlar</button>
   </nav>
 
   <main class="content">
     <!-- TAB 1: PACKET & OSI INSPECTOR -->
     <section id="tab-packets" class="tab-panel active">
-      <div class="filter-bar">
-        <input type="text" id="filterIp" placeholder="IP Filtrele (örn: 192.168.1.1)" />
-        <input type="number" id="filterPort" placeholder="Port (örn: 443, 53)" />
-        <select id="filterProto">
-          <option value="">Tüm Protokoller</option>
-          <option value="TCP">TCP</option>
-          <option value="UDP">UDP</option>
-          <option value="DNS">DNS</option>
-          <option value="TLS">TLS / HTTPS</option>
-          <option value="HTTP">HTTP</option>
-          <option value="SSH">SSH</option>
-          <option value="ICMP">ICMP</option>
-        </select>
-        <input type="text" id="filterContainer" placeholder="Container..." />
-        <input type="text" id="filterSearch" placeholder="Domain (SNI) veya içerik ara..." />
-        <select id="pageSizeSelect" title="Sayfa başına gösterilecek paket sayısı">
-          <option value="50" selected>50 Kayıt / Sayfa</option>
-          <option value="100">100 Kayıt / Sayfa</option>
-          <option value="150">150 Kayıt / Sayfa</option>
-        </select>
-        <button id="btnApplyFilter" class="btn btn-primary">Filtrele</button>
-        <button id="btnClearFilter" class="btn btn-outline">Sıfırla</button>
-        <button id="btnClearPackets" class="btn btn-outline" title="Kayıtlı paket geçmişini temizle">Tabloyu Boşalt</button>
-        <label class="auto-scroll-toggle">
-          <input type="checkbox" id="chkLiveStream" checked />
-          <span id="liveStreamLabel">Canlı Akış</span>
-        </label>
+      <div class="filter-wrapper">
+        <div class="filter-header-bar">
+          <button type="button" id="btnToggleFilters" class="btn btn-outline btn-sm filter-toggle-btn">
+            🔍 Filtreler
+          </button>
+          <label class="auto-scroll-toggle">
+            <input type="checkbox" id="chkLiveStream" checked />
+            <span id="liveStreamLabel">Canlı Akış</span>
+          </label>
+        </div>
+        <div class="filter-bar" id="packetFilterBar">
+          <input type="text" id="filterIp" placeholder="IP Filtrele (örn: 192.168.1.1)" />
+          <input type="number" id="filterPort" placeholder="Port (örn: 443, 53)" />
+          <select id="filterProto">
+            <option value="">Tüm Protokoller</option>
+            <option value="TCP">TCP</option>
+            <option value="UDP">UDP</option>
+            <option value="DNS">DNS</option>
+            <option value="TLS">TLS / HTTPS</option>
+            <option value="HTTP">HTTP</option>
+            <option value="SSH">SSH</option>
+            <option value="ICMP">ICMP</option>
+          </select>
+          <input type="text" id="filterContainer" placeholder="Container..." />
+          <input type="text" id="filterSearch" placeholder="Domain (SNI) veya içerik ara..." />
+          <select id="pageSizeSelect" title="Sayfa başına gösterilecek paket sayısı">
+            <option value="50" selected>50 Kayıt / Sayfa</option>
+            <option value="100">100 Kayıt / Sayfa</option>
+            <option value="150">150 Kayıt / Sayfa</option>
+          </select>
+          <div class="filter-actions">
+            <button id="btnApplyFilter" class="btn btn-primary">Filtrele</button>
+            <button id="btnClearFilter" class="btn btn-outline">Sıfırla</button>
+            <button id="btnClearPackets" class="btn btn-outline" title="Kayıtlı paket geçmişini temizle">Temizle</button>
+          </div>
+        </div>
       </div>
 
       <div class="pagination-bar">
