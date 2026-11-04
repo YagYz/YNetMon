@@ -254,14 +254,50 @@
                 <input type="url" id="setHubUrl" placeholder="http://127.0.0.1:9090/api/notify" />
               </label>
               <label>
-                <span>Entegrasyon &amp; Bot Hub API Key (X-API-Key)</span>
+                <span>Legacy Hub Key (Opsiyonel Geriye Uyumluluk)</span>
                 <input type="text" id="setHubApiKey" placeholder="En az 8 karakterli gizli anahtar" />
               </label>
             </div>
+
+            <!-- API Keys Section -->
+            <div style="margin-top:10px;margin-bottom:12px;padding:10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <span style="font-weight:600;font-size:12.5px;color:var(--text);">🔑 YNetMon API Anahtarları (REST / Bot / Entegrasyon)</span>
+              </div>
+              <div style="display:flex;gap:6px;margin-bottom:8px;">
+                <input type="text" id="newKeyName" placeholder="Anahtar Açıklaması (Örn: Telegram Bot, YDevHub)" style="flex:1;font-size:12px;padding:5px 8px;" />
+                <button type="button" id="btnCreateApiKey" class="btn btn-primary btn-sm">+ Yeni Anahtar Üret</button>
+              </div>
+              <div id="newKeyAlert" style="display:none;padding:8px;background:rgba(34,197,94,0.15);border:1px solid #22c55e;border-radius:4px;margin-bottom:8px;font-size:12px;">
+                <span style="color:#22c55e;font-weight:bold;">Üretilen API Key (Sadece bir kez gösterilir):</span><br/>
+                <code id="newKeySecret" style="display:block;margin:4px 0;word-break:break-all;color:#e2e8f0;background:#0f172a;padding:4px 6px;border-radius:3px;"></code>
+                <span style="font-size:11px;color:#94a3b8;">Lütfen bu anahtarı güvenli yere kopyalayın.</span>
+              </div>
+              <div class="table-wrap" style="max-height:160px;overflow-y:auto;">
+                <table class="data-table" style="font-size:11.5px;">
+                  <thead>
+                    <tr>
+                      <th>Prefix</th>
+                      <th>Tanım</th>
+                      <th>Rol</th>
+                      <th>Oluşturulma</th>
+                      <th>Son Kullanım</th>
+                      <th>İşlem</th>
+                    </tr>
+                  </thead>
+                  <tbody id="apiKeysTableBody">
+                    <tr><td colspan="6" class="muted" style="text-align:center;">API anahtarları yükleniyor...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <div class="osi-learn" style="font-size:11.5px;">
-              🔗 <strong>Dış Servis / Bot Sorgu Uç Noktaları (<code>X-API-Key</code> başlığı ile):</strong><br/>
+              🔗 <strong>Dış Servis / Bot Sorgu Uç Noktaları (<code>X-API-Key</code> veya <code>Bearer</code> başlığı ile):</strong><br/>
               • <code>GET /api/v1/integration/summary</code> (Anlık hız, bağlantı, DB ve son alarmlar)<br/>
               • <code>GET /api/v1/integration/alerts</code> (Son alarmlar listesi)<br/>
+              • <code>GET /api/v1/integration/devices</code> (Ağdaki cihazlar ve durumları)<br/>
+              • <code>GET /api/v1/integration/connections</code> (Anlık aktif TCP/UDP bağlantıları)<br/>
               • <code>GET /api/v1/integration/docker</code> (Çalışan container ağ istatistikleri)
             </div>
 
