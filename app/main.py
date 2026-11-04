@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import hmac
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -31,18 +33,23 @@ from .auth import (
 from .database import (
     clear_alerts_db,
     clear_packets_db,
+    create_api_key_db,
+    delete_api_key_db,
     delete_device_db,
     flush_device_buffer,
     flush_packet_buffer,
     get_alerts,
+    get_api_key_by_hash,
     get_device_stats,
     get_packet_by_id,
     get_settings,
     get_storage_stats,
     get_user_by_username,
     init_db,
+    list_api_keys_db,
     query_packets,
     run_db_maintenance,
+    update_api_key_last_used,
     update_device_name_db,
     update_settings,
 )
@@ -559,20 +566,84 @@ async def api_update_settings(
     return await api_get_settings(sess)
 
 
-# External Bot Hub & Homelab Integration API (Authenticated via X-API-Key header)
-async def require_integration_key(request: Request) -> None:
+# API Key Management Models
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=64)
+    role: Optional[str] = "integration"
+
+
+# External Bot Hub & Homelab Integration API (Authenticated via X-API-Key or Bearer token)
+async def require_integration_key(request: Request) -> Dict[str, Any]:
     provided = request.headers.get("X-API-Key", "").strip()
+    if not provided:
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header.lower().startswith("bearer "):
+            provided = auth_header[7:].strip()
+
+    if not provided:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Yetkilendirme anahtarı bulunamadı (X-API-Key veya Bearer token gerekli).",
+        )
+
+    # 1. Check generated API Keys in database
+    token_hash = hashlib.sha256(provided.encode("utf-8")).hexdigest()
+    api_key_record = await asyncio.to_thread(get_api_key_by_hash, token_hash)
+    if api_key_record:
+        await asyncio.to_thread(update_api_key_last_used, api_key_record["id"])
+        return api_key_record
+
+    # 2. Check legacy / configured hub_api_key in settings
     settings = await asyncio.to_thread(get_settings)
     expected = (settings.get("hub_api_key") or "").strip()
-    if not expected or len(expected) < 8:
-        raise HTTPException(
-            status_code=403,
-            detail="Entegrasyon API'si için Ayarlar'dan en az 8 karakterli bir 'Bot Hub API Key' tanımlayın.",
-        )
-    if not provided or not hmac.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="Geçersiz X-API-Key.")
+    if expected and len(expected) >= 8 and hmac.compare_digest(provided, expected):
+        return {
+            "id": 0,
+            "name": "Legacy Hub Key",
+            "role": "integration",
+            "prefix": expected[:8],
+        }
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Geçersiz API Anahtarı.")
 
 
+# API Key Management Endpoints (Admin Session Authenticated)
+@app.get("/api/keys")
+async def api_list_keys(sess: Dict[str, str] = Depends(require_auth)) -> Dict[str, Any]:
+    keys = await asyncio.to_thread(list_api_keys_db)
+    return {"api_keys": keys, "count": len(keys)}
+
+
+@app.post("/api/keys")
+async def api_create_key(
+    body: ApiKeyCreateRequest,
+    sess: Dict[str, str] = Depends(require_auth),
+) -> Dict[str, Any]:
+    raw_secret = f"ynm_{secrets.token_hex(24)}"
+    token_hash = hashlib.sha256(raw_secret.encode("utf-8")).hexdigest()
+    prefix = raw_secret[:10]
+    clean_name = body.name.strip()
+    clean_role = (body.role or "integration").strip()[:32]
+    record = await asyncio.to_thread(create_api_key_db, token_hash, prefix, clean_name, clean_role)
+    return {
+        "ok": True,
+        "api_key": raw_secret,  # Only shown upon creation
+        "key_info": record,
+    }
+
+
+@app.delete("/api/keys/{key_id}")
+async def api_delete_key(
+    key_id: int,
+    sess: Dict[str, str] = Depends(require_auth),
+) -> Dict[str, Any]:
+    ok = await asyncio.to_thread(delete_api_key_db, key_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="API anahtarı bulunamadı.")
+    return {"ok": True, "deleted_id": key_id}
+
+
+# External Integration Endpoints
 @app.get("/api/v1/integration/summary", dependencies=[Depends(require_integration_key)])
 async def integration_summary() -> Dict[str, Any]:
     """External integration endpoint for Telegram Bot Hub / Homepage / Uptime monitors."""
@@ -606,6 +677,40 @@ async def integration_alerts(limit: int = Query(20, ge=1, le=100)) -> Dict[str, 
 @app.get("/api/v1/integration/docker", dependencies=[Depends(require_integration_key)])
 async def integration_docker() -> Dict[str, Any]:
     return {"service": "YNetMon", "containers": monitor.docker_containers}
+
+
+@app.get("/api/v1/integration/devices", dependencies=[Depends(require_integration_key)])
+async def integration_devices(limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
+    devices = await asyncio.to_thread(get_device_stats, limit)
+    return {
+        "service": "YNetMon",
+        "devices": devices,
+        "count": len(devices),
+        "active_count": sum(1 for d in devices if d.get("is_online")),
+    }
+
+
+@app.get("/api/v1/integration/connections", dependencies=[Depends(require_integration_key)])
+async def integration_connections() -> Dict[str, Any]:
+    return {
+        "service": "YNetMon",
+        "connections": monitor.active_connections,
+        "count": len(monitor.active_connections),
+    }
+
+
+@app.get("/api/v1/integration/packets", dependencies=[Depends(require_integration_key)])
+async def integration_packets(
+    limit: int = Query(25, ge=1, le=100),
+    protocol: Optional[str] = None,
+    ip: Optional[str] = None,
+) -> Dict[str, Any]:
+    res = await asyncio.to_thread(query_packets, limit, 0, ip, None, protocol, None, None)
+    return {
+        "service": "YNetMon",
+        "packets": res.get("packets", []),
+        "total": res.get("total", 0),
+    }
 
 
 @app.post("/api/telegram/detect-chat-id")

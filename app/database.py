@@ -76,6 +76,17 @@ def init_db() -> None:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT UNIQUE NOT NULL,
+                prefix TEXT NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT DEFAULT 'integration',
+                created_at REAL NOT NULL,
+                last_used_at REAL
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS packets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -312,6 +323,83 @@ def delete_user_sessions_db(username: str) -> None:
         cur.execute("DELETE FROM sessions WHERE username = ?", (username,))
         conn.commit()
         conn.close()
+
+
+def create_api_key_db(key_hash: str, prefix: str, name: str, role: str = "integration") -> Dict[str, Any]:
+    now = time.time()
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO api_keys (key_hash, prefix, name, role, created_at, last_used_at)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (key_hash, prefix, name, role, now),
+        )
+        key_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+    return {
+        "id": key_id,
+        "prefix": prefix,
+        "name": name,
+        "role": role,
+        "created_at": now,
+        "last_used_at": None,
+    }
+
+
+def list_api_keys_db() -> List[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, prefix, name, role, created_at, last_used_at
+        FROM api_keys
+        ORDER BY id DESC
+        """
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_api_key_by_hash(key_hash: str) -> Optional[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, key_hash, prefix, name, role, created_at, last_used_at
+        FROM api_keys
+        WHERE key_hash = ?
+        """,
+        (key_hash,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_api_key_last_used(key_id: int) -> None:
+    now = time.time()
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (now, key_id))
+        conn.commit()
+        conn.close()
+
+
+def delete_api_key_db(key_id: int) -> bool:
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+    return deleted
 
 
 def buffer_device_traffic(

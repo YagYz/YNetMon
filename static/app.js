@@ -670,7 +670,51 @@ async function loadDocker(refresh = false) {
 document.getElementById("btnRefreshDocker").addEventListener("click", () => loadDocker(true));
 
 // Alerts, Storage & Settings Tab
+async function loadApiKeys() {
+  const tbody = document.getElementById("apiKeysTableBody");
+  if (!tbody) return;
+  try {
+    const res = await apiFetch("/api/keys");
+    const data = await res.json();
+    const keys = data.api_keys || [];
+    if (keys.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;">Henüz üretilmiş API anahtarı yok.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = keys
+      .map(
+        (k) => `
+        <tr>
+          <td><code>${escapeHtml(k.prefix)}...</code></td>
+          <td><strong>${escapeHtml(k.name)}</strong></td>
+          <td><span class="badge badge-gray">${escapeHtml(k.role || "integration")}</span></td>
+          <td>${new Date(k.created_at * 1000).toLocaleString("tr-TR")}</td>
+          <td>${k.last_used_at ? new Date(k.last_used_at * 1000).toLocaleTimeString("tr-TR") : "<span class='muted'>Kullanılmadı</span>"}</td>
+          <td>
+            <button type="button" class="btn btn-outline btn-sm btn-del-key" data-id="${k.id}" style="color:#ef4444;border-color:rgba(239,68,68,0.4);padding:2px 6px;">Sil</button>
+          </td>
+        </tr>
+      `
+      )
+      .join("");
+
+    tbody.querySelectorAll(".btn-del-key").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Bu API anahtarını silmek istediğinize emin misiniz?")) return;
+        const keyId = btn.dataset.id;
+        const delRes = await apiFetch(`/api/keys/${keyId}`, { method: "DELETE" });
+        if (delRes.ok) {
+          loadApiKeys();
+        }
+      });
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" style="color:#ef4444;text-align:center;">API anahtarları alınamadı: ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
 async function loadSettings() {
+  loadApiKeys();
   const res = await apiFetch("/api/settings");
   const s = await res.json();
   document.getElementById("setHubUrl").value = s.hub_url || "";
@@ -690,6 +734,40 @@ async function loadSettings() {
   document.getElementById("setBwThreshold").value = s.bandwidth_threshold_mbps || "50.0";
   document.getElementById("setScanThreshold").value = s.port_scan_threshold || "15";
 }
+
+document.getElementById("btnCreateApiKey")?.addEventListener("click", async () => {
+  const nameInput = document.getElementById("newKeyName");
+  const name = nameInput.value.trim();
+  if (!name) {
+    alert("Lütfen API anahtarı için bir açıklama (örn: Telegram Bot, YDevHub) girin.");
+    nameInput.focus();
+    return;
+  }
+  const btn = document.getElementById("btnCreateApiKey");
+  btn.disabled = true;
+  try {
+    const res = await apiFetch("/api/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, role: "integration" }),
+    });
+    const data = await res.json();
+    if (data.ok && data.api_key) {
+      nameInput.value = "";
+      const alertBox = document.getElementById("newKeyAlert");
+      const secretBox = document.getElementById("newKeySecret");
+      secretBox.textContent = data.api_key;
+      alertBox.style.display = "block";
+      loadApiKeys();
+    } else {
+      alert("API anahtarı oluşturulamadı: " + (data.detail || "Bilinmeyen hata"));
+    }
+  } catch (err) {
+    alert("İstek hatası: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 document.getElementById("btnVacuumDb").addEventListener("click", async () => {
   const statusEl = document.getElementById("settingsStatus");
