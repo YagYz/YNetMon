@@ -83,7 +83,8 @@ function updateStorageBadge(st) {
   const el = document.getElementById("storageBadge");
   if (el) {
     const ramInfo = st.ram_packets_count ? ` + ${st.ram_packets_count} RAM` : "";
-    el.textContent = `DB: ${st.db_size_mb ?? 0} MB (${st.packets_count ?? 0} pkt${ramInfo})`;
+    const modeTag = st.disk_persistence_enabled ? "" : " [RAM Modu]";
+    el.textContent = `DB: ${st.db_size_mb ?? 0} MB (${st.packets_count ?? 0} pkt${ramInfo})${modeTag}`;
   }
 }
 
@@ -733,6 +734,7 @@ async function loadSettings() {
   document.getElementById("setWatchedPorts").value = s.watched_ports || "21,22,23,3389,4444,5900";
   document.getElementById("setBwThreshold").value = s.bandwidth_threshold_mbps || "50.0";
   document.getElementById("setScanThreshold").value = s.port_scan_threshold || "15";
+  document.getElementById("setDiskPersistence").checked = (s.disk_persistence_enabled === "true" || s.disk_persistence_enabled === "1");
 }
 
 document.getElementById("btnCreateApiKey")?.addEventListener("click", async () => {
@@ -820,6 +822,7 @@ document.getElementById("settingsForm").addEventListener("submit", async (e) => 
     watched_ports: document.getElementById("setWatchedPorts").value.trim(),
     bandwidth_threshold_mbps: document.getElementById("setBwThreshold").value.trim(),
     port_scan_threshold: document.getElementById("setScanThreshold").value.trim(),
+    disk_persistence_enabled: document.getElementById("setDiskPersistence").checked ? "true" : "false",
   };
   const res = await apiFetch("/api/settings", {
     method: "POST",

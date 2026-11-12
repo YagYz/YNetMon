@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 from .intel import identify_mac_vendor
@@ -14,9 +15,10 @@ _device_buffer_lock = threading.Lock()
 _device_buffer: Dict[str, Dict[str, Any]] = {}
 _last_device_flush: float = time.time()
 _packet_buffer_lock = threading.Lock()
-_packet_buffer: List[Dict[str, Any]] = []
+_packet_buffer: deque = deque(maxlen=5000)
 _last_packet_flush: float = time.time()
 _last_pkt_seq: int = 0
+_api_key_last_used_cache: Dict[int, float] = {}
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
@@ -176,6 +178,7 @@ def init_db() -> None:
             "max_stored_packets": "5000",
             "retention_hours": "24",
             "flow_dedup_seconds": "5",
+            "disk_persistence_enabled": "false",
         }
         for k, v in defaults.items():
             cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -383,6 +386,10 @@ def get_api_key_by_hash(key_hash: str) -> Optional[Dict[str, Any]]:
 
 def update_api_key_last_used(key_id: int) -> None:
     now = time.time()
+    last_flushed = _api_key_last_used_cache.get(key_id, 0.0)
+    if now - last_flushed < 300.0:
+        return
+    _api_key_last_used_cache[key_id] = now
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
@@ -473,12 +480,15 @@ def flush_device_buffer() -> None:
 
 
 def flush_packet_buffer() -> None:
+    settings = get_settings()
+    if settings.get("disk_persistence_enabled", "false").lower() not in ("true", "1", "yes"):
+        return
+
     global _last_packet_flush, _last_pkt_seq
     with _packet_buffer_lock:
         if not _packet_buffer:
             return
         batch = list(_packet_buffer)
-        _packet_buffer.clear()
         _last_packet_flush = time.time()
 
     with _write_lock:
@@ -527,7 +537,6 @@ def flush_packet_buffer() -> None:
             ],
         )
 
-        settings = get_settings()
         max_pkts = int(settings.get("max_stored_packets", "5000") or 5000)
         max_pkts = max(100, min(50000, max_pkts))
         cur.execute(
@@ -547,7 +556,8 @@ def insert_packet(pkt: Dict[str, Any]) -> int:
         _packet_buffer.append(pkt)
         should_flush = len(_packet_buffer) >= 5000
 
-    if should_flush:
+    settings = get_settings()
+    if should_flush and settings.get("disk_persistence_enabled", "false").lower() in ("true", "1", "yes"):
         flush_packet_buffer()
 
     record_device_traffic_only(pkt)
@@ -568,7 +578,7 @@ def record_device_traffic_only(pkt: Dict[str, Any]) -> None:
         buffer_device_traffic(src_ip, pkt.get("src_mac", ""), src_container, length, 0, 1, 0, proto, now)
     if dst_ip and is_lan_ip(dst_ip):
         buffer_device_traffic(dst_ip, pkt.get("dst_mac", ""), dst_container, 0, length, 0, 1, proto, now)
-    if now - _last_device_flush > 5.0 or len(_device_buffer) > 40:
+    if now - _last_device_flush > 60.0 or len(_device_buffer) > 200:
         flush_device_buffer()
 
 
@@ -904,31 +914,34 @@ def clear_packets_db() -> None:
 
 def run_db_maintenance() -> Dict[str, Any]:
     """Prune old packets by count & age, cap device_stats, and checkpoint WAL so disk usage stays bounded."""
-    flush_packet_buffer()
+    settings = get_settings()
+    is_disk_enabled = settings.get("disk_persistence_enabled", "false").lower() in ("true", "1", "yes")
+    if is_disk_enabled:
+        flush_packet_buffer()
     flush_device_buffer()
     with _write_lock:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT key, value FROM settings WHERE key IN ('max_stored_packets', 'retention_hours')")
-        cfg = {r["key"]: r["value"] for r in cur.fetchall()}
-        max_pkts = int(cfg.get("max_stored_packets", "5000") or 5000)
-        max_pkts = max(100, min(10000, max_pkts))
-        ret_hours = float(cfg.get("retention_hours", "24") or 24.0)
-        cutoff = time.time() - (ret_hours * 3600.0)
+        if is_disk_enabled:
+            cur.execute("SELECT key, value FROM settings WHERE key IN ('max_stored_packets', 'retention_hours')")
+            cfg = {r["key"]: r["value"] for r in cur.fetchall()}
+            max_pkts = int(cfg.get("max_stored_packets", "5000") or 5000)
+            max_pkts = max(100, min(10000, max_pkts))
+            ret_hours = float(cfg.get("retention_hours", "24") or 24.0)
+            cutoff = time.time() - (ret_hours * 3600.0)
 
-        cur.execute("DELETE FROM packets WHERE timestamp < ?", (cutoff,))
-        cur.execute(
-            "DELETE FROM packets WHERE id NOT IN (SELECT id FROM packets ORDER BY id DESC LIMIT ?)",
-            (max_pkts,),
-        )
+            cur.execute("DELETE FROM packets WHERE timestamp < ?", (cutoff,))
+            cur.execute(
+                "DELETE FROM packets WHERE id NOT IN (SELECT id FROM packets ORDER BY id DESC LIMIT ?)",
+                (max_pkts,),
+            )
         cur.execute(
             "DELETE FROM device_stats WHERE ip NOT IN (SELECT ip FROM device_stats ORDER BY last_seen DESC LIMIT 300)"
         )
         cur.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         conn.commit()
         try:
-            cur.execute("PRAGMA incremental_vacuum(200);")
-            cur.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            cur.execute("PRAGMA wal_checkpoint(PASSIVE);")
         except Exception:
             pass
         conn.close()
@@ -936,7 +949,6 @@ def run_db_maintenance() -> Dict[str, Any]:
 
 
 def get_storage_stats() -> Dict[str, Any]:
-    flush_device_buffer()
     now = time.time()
     conn = get_conn()
     cur = conn.cursor()
@@ -962,12 +974,15 @@ def get_storage_stats() -> Dict[str, Any]:
                 total_bytes += os.path.getsize(p)
             except Exception:
                 pass
+    settings = get_settings()
+    disk_persist = settings.get("disk_persistence_enabled", "false").lower() in ("true", "1", "yes")
     return {
         "db_size_bytes": total_bytes,
         "db_size_mb": round(total_bytes / (1024 * 1024), 2),
         "packets_count": total_pkts,
         "ram_packets_count": ram_pkts,
         "db_packets_count": p_cnt,
+        "disk_persistence_enabled": disk_persist,
         "devices_count": active_d_cnt,
         "active_devices_count": active_d_cnt,
         "total_devices_count": total_d_cnt,
@@ -1014,6 +1029,7 @@ def update_settings(new_settings: Dict[str, Any]) -> Dict[str, str]:
         "max_stored_packets",
         "retention_hours",
         "flow_dedup_seconds",
+        "disk_persistence_enabled",
     }
     with _write_lock:
         conn = get_conn()
