@@ -145,8 +145,12 @@ async def _background_sampler() -> None:
             await asyncio.to_thread(monitor.sample_metrics)
             if tick % 5 == 0:
                 await asyncio.to_thread(monitor.refresh_docker_containers)
-            if tick % 60 == 0 and tick > 0:
+            # Periodic WAL & DB cleanup every 15 minutes (900s) to keep disk IO minimal
+            if tick % 900 == 0 and tick > 0:
                 await asyncio.to_thread(run_db_maintenance)
+            elif tick % 60 == 0 and tick > 0:
+                # Flush device bandwidth/counter buffer to SQLite periodically
+                await asyncio.to_thread(flush_device_buffer)
             tick += 1
         except Exception:
             pass

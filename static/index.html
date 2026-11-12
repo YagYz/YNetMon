@@ -302,6 +302,18 @@
             </div>
 
             <h4 style="color:var(--accent);font-size:13px;margin-top:4px;">2. Veri Saklama &amp; Disk Optimizasyonu</h4>
+            <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:12px;">
+              <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin:0;">
+                <input type="checkbox" id="setDiskPersistence" style="width:auto;margin-top:3px;cursor:pointer;" />
+                <div>
+                  <strong style="color:var(--fg);font-size:13px;">Diske Paket Kaydı (Disk Persistence)</strong>
+                  <p style="margin:2px 0 0;font-size:11px;color:var(--muted);line-height:1.4;">
+                    <strong>Kapalı (Önerilen):</strong> Paketler yalnızca RAM'de (son 5.000 paket, ~22 MB) saklanır; diske paket I/O yapılmaz.<br/>
+                    <strong>Açık:</strong> Paketler toplu olarak SQLite <code>packets</code> tablosuna kalıcı olarak yazılır.
+                  </p>
+                </div>
+              </label>
+            </div>
             <div class="form-row">
               <label>
                 <span>Maksimum Paket Kaydı (100-10000)</span>
